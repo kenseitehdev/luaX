@@ -25,7 +25,8 @@ typedef struct Multi Multi;
 
 typedef struct Value Value;
 typedef Value (*CFunc)(struct VM *vm, int argc, Value *argv);
-
+struct VM *vm_create_repl(void);
+void exec_stmt_repl(struct VM *vm, AST *n);
 /* Strings */
 struct Str {
   int   len;

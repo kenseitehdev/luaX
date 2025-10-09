@@ -1214,92 +1214,6 @@ case AST_GOTO: {
         pc++;
         break;
       }
-case AST_ASSIGN_LIST: {
-    size_t rn = st->as.massign.rvals.count;
-    Value *rv = rn? xmalloc(sizeof(Value)*rn):NULL;
-    
-    // Evaluate all right-hand side expressions
-    for(size_t i=0;i<rn;i++) {
-        rv[i]=eval_expr(vm, st->as.massign.rvals.items[i]);
-    }
-    
-    // Check if we need to expand the last value (multiple returns)
-    Value *all_vals = rv;
-    size_t total_vals = rn;
-    bool expanded = false;
-    
-    if(rn > 0 && st->as.massign.lvals.count > rn){
-        Value last = rv[rn-1];
-        // Check if last value is a table with numeric keys (multiple return values)
-        if(last.tag == VAL_TABLE){
-            Value test;
-            if(tbl_get(last.as.t, V_int(1), &test)){
-                // Expand the table into separate values
-                size_t needed = st->as.massign.lvals.count;
-                all_vals = xmalloc(sizeof(Value) * needed);
-                expanded = true;
-                
-                // Copy first rn-1 values
-                for(size_t i=0; i<rn-1; i++){
-                    all_vals[i] = rv[i];
-                }
-                
-                // Unpack the table
-                size_t idx = rn-1;
-                for(long long j=1; idx < needed; j++){
-                    Value v;
-                    if(tbl_get(last.as.t, V_int(j), &v)){
-                        all_vals[idx++] = v;
-                    } else {
-                        all_vals[idx++] = V_nil();
-                    }
-                }
-                total_vals = needed;
-            }
-        }
-    }
-    
-    // Assign to left-hand side variables
-    for(size_t i=0;i<st->as.massign.lvals.count;i++){
-        AST *lhs = st->as.massign.lvals.items[i];
-        Value val = (i<total_vals)?all_vals[i]:V_nil();
-        
-        if(lhs->kind==AST_IDENT){
-            Env *owner=NULL; int slot=-1;
-            if(env_find(vm->env, lhs->as.ident.name, &owner, &slot)){
-                owner->vals[slot]=val;
-            } else {
-                env_add(env_root(vm->env), lhs->as.ident.name, val, false);
-            }
-        } else if(lhs->kind==AST_INDEX){
-            Value t = eval_expr(vm, lhs->as.index.target);
-            Value k = eval_expr(vm, lhs->as.index.index);
-            assign_index(vm, t, k, val);
-        } else if(lhs->kind==AST_FIELD){
-            Value t = eval_expr(vm, lhs->as.field.target);
-            Value k = V_str_from_c(lhs->as.field.field);
-            assign_index(vm, t, k, val);
-        }
-    }
-    
-    // Cleanup
-    if(expanded) free(all_vals);
-    if(rv) free(rv);
-    pc++;
-    break;
-}
-case AST_VAR: {
-  Value init = st->as.var.init? eval_expr(vm, st->as.var.init): V_nil();
-  env_add(vm->env, st->as.var.name, init, st->as.var.is_local);
-  if (st->as.var.is_close) {
-    Env *owner=NULL; int slot=-1;
-    if (env_find(vm->env, st->as.var.name, &owner, &slot) && owner == vm->env) {
-      env_register_close(owner, slot);
-    }
-  }
-  pc++;
-  break;
-}
       case AST_BLOCK:
         exec_block(vm, st);
         if (vm->pending_goto) {
@@ -1570,16 +1484,32 @@ case AST_VAR: {
       }
       case AST_BREAK:
         vm->break_flag=true; pc++; break;
+// Fixes for interpreter.c - Multi-return handling
+
+// Replace the AST_RETURN case with this:
+// Complete fix for interpreter.c - Multi-return handling
+// This addresses the issue where single returns were being wrapped in tables
+
+/* ==================================================================
+   IMPORTANT: The issue is that we DON'T need the marker system.
+   The real problem is simpler - just don't unpack regular tables!
+   
+   Solution: Only create multi-return tables in specific contexts
+   where Lua actually supports multiple returns (function calls in
+   the last position of an assignment list).
+   ==================================================================*/
+
+// 1. KEEP AST_RETURN SIMPLE - just return single values normally
 case AST_RETURN: {
   Value rv = V_nil();
   if(st->as.ret.values.count == 0){
-    // No return values - return nil
     rv = V_nil();
   } else if(st->as.ret.values.count == 1){
-    // Single return value - keep existing behavior
+    // Single return value - return as-is
     rv = eval_expr(vm, st->as.ret.values.items[0]);
   } else {
-    // Multiple return values - pack into a table
+    // Multiple return values - pack into table WITHOUT marker
+    // We'll handle unpacking at the call site
     rv = V_table();
     for(size_t i = 0; i < st->as.ret.values.count; i++){
       Value v = eval_expr(vm, st->as.ret.values.items[i]);
@@ -1593,6 +1523,134 @@ case AST_RETURN: {
   if(labels) free(labels);
   return;
 }
+
+// 2. FIX AST_ASSIGN_LIST - Don't unpack arbitrary tables!
+case AST_ASSIGN_LIST: {
+    size_t rn = st->as.massign.rvals.count;
+    Value *rv = rn? xmalloc(sizeof(Value)*rn):NULL;
+    
+    // Track which RHS values are function calls (only those can expand)
+    bool *is_call = rn? xmalloc(sizeof(bool)*rn):NULL;
+    
+    // Evaluate all right-hand side expressions
+    for(size_t i=0;i<rn;i++) {
+        AST *rhs = st->as.massign.rvals.items[i];
+        is_call[i] = (rhs && rhs->kind == AST_CALL);
+        rv[i]=eval_expr(vm, rhs);
+    }
+    
+    // Check if we need to expand the last value
+    // ONLY expand if: 1) it's a call, 2) returns a table, 3) we need more values
+    Value *all_vals = rv;
+    size_t total_vals = rn;
+    bool expanded = false;
+    
+    if(rn > 0 && st->as.massign.lvals.count > rn && is_call[rn-1]){
+        Value last = rv[rn-1];
+        // Check if it's a table that looks like multi-return
+        // (has sequential numeric keys starting from 1)
+        if(last.tag == VAL_TABLE){
+            Value test;
+            if(tbl_get(last.as.t, V_int(1), &test) && test.tag != VAL_NIL){
+                // Looks like multi-return, expand it
+                size_t needed = st->as.massign.lvals.count;
+                all_vals = xmalloc(sizeof(Value) * needed);
+                expanded = true;
+                
+                // Copy first rn-1 values
+                for(size_t i=0; i<rn-1; i++){
+                    all_vals[i] = rv[i];
+                }
+                
+                // Unpack the table
+                size_t idx = rn-1;
+                for(long long j=1; idx < needed; j++){
+                    Value v;
+                    if(tbl_get(last.as.t, V_int(j), &v)){
+                        all_vals[idx++] = v;
+                    } else {
+                        all_vals[idx++] = V_nil();
+                    }
+                }
+                total_vals = needed;
+            }
+        }
+    }
+    
+    // Assign to left-hand side variables
+    for(size_t i=0;i<st->as.massign.lvals.count;i++){
+        AST *lhs = st->as.massign.lvals.items[i];
+        Value val = (i<total_vals)?all_vals[i]:V_nil();
+        
+        if(lhs->kind==AST_IDENT){
+            Env *owner=NULL; int slot=-1;
+            if(env_find(vm->env, lhs->as.ident.name, &owner, &slot)){
+                owner->vals[slot]=val;
+            } else {
+                env_add(env_root(vm->env), lhs->as.ident.name, val, false);
+            }
+        } else if(lhs->kind==AST_INDEX){
+            Value t = eval_expr(vm, lhs->as.index.target);
+            Value k = eval_expr(vm, lhs->as.index.index);
+            assign_index(vm, t, k, val);
+        } else if(lhs->kind==AST_FIELD){
+            Value t = eval_expr(vm, lhs->as.field.target);
+            Value k = V_str_from_c(lhs->as.field.field);
+            assign_index(vm, t, k, val);
+        }
+    }
+    
+    // Cleanup
+    if(expanded) free(all_vals);
+    if(rv) free(rv);
+    if(is_call) free(is_call);
+    pc++;
+    break;
+}
+
+// 3. ALSO NEED TO FIX AST_VAR if it supports multiple variables
+// Add this check after the existing AST_VAR case:
+
+case AST_VAR: {
+  // Check if this is actually a multi-variable declaration
+  // If your parser creates AST_VAR for "local a,b,c = one()",
+  // you might need special handling here too.
+  
+  Value init = st->as.var.init? eval_expr(vm, st->as.var.init): V_nil();
+  
+  // TODO: If your AST supports multiple variables in one AST_VAR node,
+  // you need to handle unpacking here similar to AST_ASSIGN_LIST
+  
+  env_add(vm->env, st->as.var.name, init, st->as.var.is_local);
+  if (st->as.var.is_close) {
+    Env *owner=NULL; int slot=-1;
+    if (env_find(vm->env, st->as.var.name, &owner, &slot) && owner == vm->env) {
+      env_register_close(owner, slot);
+    }
+  }
+  pc++;
+  break;
+}
+
+/* ==================================================================
+   KEY INSIGHT:
+   
+   The real issue is distinguishing between:
+   1. t = {1,2,3}    -- user table
+   2. a,b,c = f()    -- where f() returns multiple values
+   
+   We can only expand case #2 safely. The way to tell them apart is:
+   - Case #2: The RHS is an AST_CALL node
+   - Case #1: The RHS is NOT an AST_CALL node
+   
+   So we ONLY unpack tables when:
+   1. There are fewer RHS expressions than LHS variables
+   2. The LAST RHS expression is an AST_CALL
+   3. That call returned a table
+   
+   This prevents unpacking user-created tables while still supporting
+   multiple return values from functions.
+   ==================================================================*/
       case AST_FUNC_STMT: {
         AST *name = st->as.fnstmt.name;
         Value fval; fval.tag = VAL_FUNC; fval.as.fn = NULL;
@@ -1894,4 +1952,103 @@ int interpret(AST *root){
   register_class_lib(&vm);
   exec_stmt(&vm, root);
   return 0;
+}
+// Add these to interpreter.c
+
+// Create a VM for REPL use (persistent across commands)
+VM *vm_create_repl(void) {
+    VM *vm = (VM*)malloc(sizeof(VM));
+    if (!vm) return NULL;
+    
+    memset(vm, 0, sizeof(VM));
+    vm->env = env_push(NULL);
+    vm->co_yielding = false;
+    vm->co_yield_vals = V_table();
+    vm->co_point.blk = NULL;
+    vm->co_point.pc = 0;
+    vm->co_call_env = NULL;
+    vm->active_co = NULL;
+    vm->err_frame = NULL;
+    vm->err_obj = V_nil();
+    
+    // Register all built-in functions (same as interpret())
+    env_add(vm->env, "print", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_print}, false);
+    env_add(vm->env, "select", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_select}, false);
+    env_add(vm->env, "pairs", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pairs}, false);
+    env_add(vm->env, "ipairs", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_ipairs}, false);
+    env_add(vm->env, "assert", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_assert}, false);
+    env_add(vm->env, "collectgarbage", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_collectgarbage}, false);
+    env_add(vm->env, "error", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_error}, false);
+    env_add(vm->env, "_G", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin__G}, false);
+    env_add(vm->env, "getmetatable", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_getmetatable}, false);
+    env_add(vm->env, "setmetatable", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_setmetatable}, false);
+    env_add(vm->env, "rawequal", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawequal}, false);
+    env_add(vm->env, "rawget", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawget}, false);
+    env_add(vm->env, "rawset", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawset}, false);
+    env_add(vm->env, "load", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_load}, false);
+    env_add(vm->env, "loadfile", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_loadfile}, false);
+    env_add(vm->env, "require", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_require}, false);
+    env_add(vm->env, "next", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_next}, false);
+    env_add(vm->env, "tonumber", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tonumber}, false);
+    env_add(vm->env, "tostring", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tostring}, false);
+    env_add(vm->env, "type", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_type}, false);
+    env_add(vm->env, "_VERSION", V_str_from_c("LuaX 1.0"), false);
+    env_add(vm->env, "xpcall", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_xpcall}, false);
+    env_add(vm->env, "pcall", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pcall}, false);
+    
+    // Initialize package table (same as interpret())
+    Value package = V_table();
+    Value loaded = V_table();
+    Value preload = V_table();
+    Value searchers = V_table();
+    
+    const char *lua_path_env = getenv("LUA_PATH");
+    const char *rocks_tree1 = "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
+    const char *rocks_tree2 = "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua";
+    const char *local_tree = "?.lua;?/init.lua;./?.lua;./?/init.lua";
+    char path_buf[2048];
+    
+    if (lua_path_env && *lua_path_env) {
+        snprintf(path_buf, sizeof(path_buf), "%s;%s;%s;%s",
+                 lua_path_env, local_tree, rocks_tree1, rocks_tree2);
+    } else {
+        snprintf(path_buf, sizeof(path_buf), "%s;%s;%s",
+                 local_tree, rocks_tree1, rocks_tree2);
+    }
+    
+    const char *lua_cpath_env = getenv("LUA_CPATH");
+    const char *cpath_default = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so";
+    const char *cpath_final = (lua_cpath_env && *lua_cpath_env) ? lua_cpath_env : cpath_default;
+    
+    tbl_set(package.as.t, V_str_from_c("loaded"), loaded);
+    tbl_set(package.as.t, V_str_from_c("preload"), preload);
+    tbl_set(package.as.t, V_str_from_c("searchers"), searchers);
+    tbl_set(package.as.t, V_str_from_c("path"), V_str_from_c(path_buf));
+    tbl_set(package.as.t, V_str_from_c("cpath"), V_str_from_c(cpath_final));
+    
+    env_add(vm->env, "package", package, false);
+    env_add(vm->env, "Packages", package, false);
+    
+    // Register all library modules
+    register_package_lib(vm);
+    register_coroutine_lib(vm);
+    register_math_lib(vm);
+    register_string_lib(vm);
+    register_table_lib(vm);
+    register_utf8_lib(vm);
+    register_os_lib(vm);
+    register_io_lib(vm);
+    register_debug_lib(vm);
+    register_random_lib(vm);
+    register_date_lib(vm);
+    register_exception_lib(vm);
+    register_async_lib(vm);
+    register_class_lib(vm);
+    
+    return vm;
+}
+
+// Execute a statement in REPL mode (persistent VM)
+void exec_stmt_repl(VM *vm, AST *n) {
+    exec_stmt(vm, n);
 }

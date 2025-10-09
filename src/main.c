@@ -5,8 +5,9 @@
 #include <errno.h>
 #include "../include/lexer.h"
 #include "../include/parser.h"
+#include "../include/interpreter.h"
 
-#define LUAX_VERSION "1.1"
+#define LUAX_VERSION "0.1.0"
 
 Token *tokens = NULL;
 int tokenCount = 0;
@@ -189,8 +190,19 @@ static int execute_code(FILE *fp) {
     return result;
 }
 
+// Forward declare exec_stmt_repl from interpreter
+extern void exec_stmt_repl(VM *vm, AST *n);
+extern VM *vm_create_repl(void);
+
 static void run_repl(void) {
     printf("LuaX %s REPL - Press Ctrl+D or type 'exit' to quit\n", LUAX_VERSION);
+    
+    // Create a persistent VM for the REPL session
+    VM *vm = vm_create_repl();
+    if (!vm) {
+        fprintf(stderr, "Failed to create REPL VM\n");
+        return;
+    }
     
     char *line = NULL;
     size_t len = 0;
@@ -220,19 +232,65 @@ static void run_repl(void) {
             break;
         }
         
-        /* Execute the line */
+        /* Parse and execute the line using the persistent VM */
         FILE *fp = open_string_as_FILE(line);
         if (!fp) {
             fprintf(stderr, "Error: failed to process input\n");
             continue;
         }
         
-        execute_code(fp);
+        // Lex the input
+        free_tokens();
+        for (;;) {
+            Token t = next(fp);
+            if (t.type == TOK_EOF) break;
+            
+            if (tokenCount >= tokenCap) {
+                int newCap = tokenCap ? tokenCap * 2 : 8;
+                Token *tmp = (Token *)realloc(tokens, newCap * sizeof(Token));
+                if (!tmp) {
+                    perror("realloc");
+                    free_tokens();
+                    fclose(fp);
+                    continue;
+                }
+                tokens = tmp;
+                tokenCap = newCap;
+            }
+            tokens[tokenCount++] = t;
+        }
         fclose(fp);
+        
+        // Parse the input
+        Parser *p = parser_create(tokens, tokenCount);
+        ASTVec stmts = (ASTVec){0};
+        while (parser_curr(p).type != TOK_EOF) {
+            AST *s = statement(p);
+            if (!s) break;
+            if (parser_curr(p).type == TOK_EOF && p->had_error) break;
+            astvec_push(&stmts, s);
+        }
+        
+        if (stmts.count == 0) {
+            parser_destroy(p);
+            free_tokens();
+            continue;
+        }
+        
+        AST *program = ast_make_block(stmts, tokenCount ? tokens[tokenCount-1].line : 1);
+        
+        // Execute using persistent VM
+        exec_stmt_repl(vm, program);
+        
+        // Cleanup
+        ast_free(program);
+        parser_destroy(p);
         free_tokens();
     }
     
     free(line);
+    // Note: We're not freeing the VM here to avoid complex cleanup
+    // In a production system, you'd want proper VM cleanup
 }
 
 int main(int argc, char **argv) {
