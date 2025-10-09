@@ -8,32 +8,42 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install build tools
+    # Set up C compiler on all platforms
+    - name: Set up compiler
       run: |
-        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+        if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
           sudo apt-get update
           sudo apt-get install -y build-essential
-        elif [ "${{ matrix.os }}" = "macos-latest" ]; then
-          brew install make
-        elif [ "${{ matrix.os }}" = "windows-latest" ]; then
+        elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+          xcode-select --install || echo "Xcode CLI tools already installed"
+        elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
           choco install mingw -y
-          choco install make -y
           echo "::add-path::C:\\tools\\mingw64\\bin"
         fi
+      shell: bash
+
+    - name: Check compiler
+      run: |
+        gcc --version
+        make --version
+      shell: bash
 
     - name: Build LuaX
-      run: make
+      run: |
+        mkdir -p bin
+        make
+      shell: bash
 
     - name: Upload binaries
       uses: actions/upload-artifact@v3
       with:
         name: LuaX-${{ matrix.os }}
-        path: ./bin/luax  # replace with your compiled binary name
+        path: ./bin/luax
