@@ -6,6 +6,8 @@
 #include "../include/lexer.h"
 #include "../include/parser.h"
 
+#define LUAX_VERSION "1.1"
+
 Token *tokens = NULL;
 int tokenCount = 0;
 int tokenCap = 0;
@@ -81,6 +83,7 @@ static int has_ext(const char *path, const char *ext) {
     size_t n = strlen(path), m = strlen(ext);
     return n >= m && strcmp(path + (n - m), ext) == 0;
 }
+
 static int allowed_ext(const char *path) {
     return has_ext(path, ".lua") || has_ext(path, ".lx");
 }
@@ -124,12 +127,133 @@ static char* read_all_stdin(void){
     return buf;
 }
 
+static void print_help(const char *progname) {
+    printf("Usage: %s [options] [file|code]\n\n", progname);
+    printf("Options:\n");
+    printf("  -h, --help     Show this help message\n");
+    printf("  -v, --version  Show version information\n\n");
+    printf("Arguments:\n");
+    printf("  file           Execute a .lua or .lx file\n");
+    printf("  code           Execute code string directly\n");
+    printf("  (none)         Start interactive REPL\n\n");
+    printf("Examples:\n");
+    printf("  %s script.lua          # Run a file\n", progname);
+    printf("  %s 'print(\"hi\")'       # Run code string\n", progname);
+    printf("  %s                     # Start REPL\n", progname);
+}
+
+static void print_version(void) {
+    printf("LuaX version %s\n", LUAX_VERSION);
+}
+
+static int execute_code(FILE *fp) {
+    free_tokens();
+    
+    /* ===== LEX ===== */
+    for (;;) {
+        Token t = next(fp);
+        if (t.type == TOK_EOF) break;
+
+        if (tokenCount >= tokenCap) {
+            int newCap = tokenCap ? tokenCap * 2 : 8;
+            Token *tmp = (Token *)realloc(tokens, newCap * sizeof(Token));
+            if (!tmp) {
+                perror("realloc");
+                free_tokens();
+                return 1;
+            }
+            tokens = tmp;
+            tokenCap = newCap;
+        }
+        tokens[tokenCount++] = t;
+    }
+
+    /* ===== PARSE ===== */
+    Parser *p = parser_create(tokens, tokenCount);
+    ASTVec stmts = (ASTVec){0};
+    while (parser_curr(p).type != TOK_EOF) {
+        AST *s = statement(p);
+        if (!s) break;
+        if (parser_curr(p).type == TOK_EOF && p->had_error) break;
+        astvec_push(&stmts, s);
+    }
+    AST *program = ast_make_block(stmts, tokenCount ? tokens[tokenCount-1].line : 1);
+
+    /* ===== RUN ===== */
+    int result = interpret(program);
+
+    /* ===== CLEANUP ===== */
+    ast_free(program);
+    parser_destroy(p);
+    
+    return result;
+}
+
+static void run_repl(void) {
+    printf("LuaX %s REPL - Press Ctrl+D or type 'exit' to quit\n", LUAX_VERSION);
+    
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t nread;
+    
+    while (1) {
+        printf("> ");
+        fflush(stdout);
+        
+        nread = getline(&line, &len, stdin);
+        if (nread == -1) {
+            printf("\n");
+            break; /* EOF (Ctrl+D) */
+        }
+        
+        /* Remove trailing newline */
+        if (nread > 0 && line[nread-1] == '\n') {
+            line[nread-1] = '\0';
+            nread--;
+        }
+        
+        /* Skip empty lines */
+        if (nread == 0) continue;
+        
+        /* Check for exit command */
+        if (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0) {
+            break;
+        }
+        
+        /* Execute the line */
+        FILE *fp = open_string_as_FILE(line);
+        if (!fp) {
+            fprintf(stderr, "Error: failed to process input\n");
+            continue;
+        }
+        
+        execute_code(fp);
+        fclose(fp);
+        free_tokens();
+    }
+    
+    free(line);
+}
+
 int main(int argc, char **argv) {
     FILE *fp = NULL;
     char *stdin_buf = NULL;
 
+    /* Handle flags */
     if (argc >= 2) {
         const char *arg = argv[1];
+        
+        if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
+            print_help(argv[0]);
+            return 0;
+        }
+        
+        if (strcmp(arg, "-v") == 0 || strcmp(arg, "--version") == 0) {
+            print_version();
+            return 0;
+        }
+        
+        /* File or code string */
         if (allowed_ext(arg)) {
             fp = fopen(arg, "r");
             if (!fp) {
@@ -144,54 +268,15 @@ int main(int argc, char **argv) {
                 return 1;
             }
         }
+        
+        int result = execute_code(fp);
+        fclose(fp);
+        free_tokens();
+        return result;
+        
     } else {
-        /* no args -> read stdin */
-        stdin_buf = read_all_stdin();
-        if (!stdin_buf) return 1;
-        fp = open_string_as_FILE(stdin_buf);
-        if (!fp) { fprintf(stderr, "failed to wrap stdin\n"); free(stdin_buf); return 1; }
+        /* No args -> start REPL */
+        run_repl();
+        return 0;
     }
-
-    /* ===== LEX ===== */
-    for (;;) {
-        Token t = next(fp);
-        if (t.type == TOK_EOF) break;
-
-        if (tokenCount >= tokenCap) {
-            int newCap = tokenCap ? tokenCap * 2 : 8;
-            Token *tmp = (Token *)realloc(tokens, newCap * sizeof(Token));
-            if (!tmp) {
-                perror("realloc");
-                free_tokens();
-                if (fp) fclose(fp);
-                free(stdin_buf);
-                return 1;
-            }
-            tokens = tmp;
-            tokenCap = newCap;
-        }
-        tokens[tokenCount++] = t;
-    }
-    if (fp) fclose(fp);
-
-    /* ===== PARSE ===== */
-    Parser *p = parser_create(tokens, tokenCount);
-    ASTVec stmts = (ASTVec){0};
-    while (parser_curr(p).type != TOK_EOF) {
-        AST *s = statement(p);
-        if (!s) break;
-        if (parser_curr(p).type == TOK_EOF && p->had_error) break;
-        astvec_push(&stmts, s);
-    }
-    AST *program = ast_make_block(stmts, tokenCount ? tokens[tokenCount-1].line : 1);
-
-    /* ===== RUN ===== */
-    (void)interpret(program);
-
-    /* ===== CLEANUP ===== */
-    ast_free(program);
-    parser_destroy(p);
-    free_tokens();
-    free(stdin_buf);
-    return 0;
 }
