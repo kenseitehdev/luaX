@@ -287,12 +287,10 @@ Value call_any(VM *vm, Value cal, int argc, Value *argv) {
         case VAL_MULTI: type_name = "multi"; break;
     }
 
-    // Build the error message
     char err_msg[512];
     snprintf(err_msg, sizeof(err_msg),
              "attempted to call a non-function: called a %s value", type_name);
 
-    // Print a stack traceback using ErrFrame chain
     if (vm->err_frame) {
         ErrFrame *frame = (ErrFrame*)vm->err_frame;
         int depth = 0;
@@ -863,10 +861,9 @@ static Value eval_expr(VM *vm, AST *n){
           return V_nil();
         }
 case OP_IDIV: {
-    Value right = vm_pop(vm);   // replace vm_pop with however you get the top Value
+    Value right = vm_pop(vm);   
     Value left  = vm_pop(vm);
 
-    // Convert to numbers
     double l = (left.tag == VAL_INT) ? (double)left.as.i :
                (left.tag == VAL_NUM) ? left.as.n : 0.0;
     double r = (right.tag == VAL_INT) ? (double)right.as.i :
@@ -876,9 +873,8 @@ case OP_IDIV: {
         vm_raise(vm, V_str_from_c("integer division by zero"));
     }
 
-    // Lua truncates toward -inf
     long long res = (long long)floor(l / r);
-    vm_push(vm,V_int(res));  // wrap back into a Value and push
+    vm_push(vm,V_int(res));  
     break;
 }
         case OP_DIV: {
@@ -1484,32 +1480,16 @@ case AST_GOTO: {
       }
       case AST_BREAK:
         vm->break_flag=true; pc++; break;
-// Fixes for interpreter.c - Multi-return handling
 
-// Replace the AST_RETURN case with this:
-// Complete fix for interpreter.c - Multi-return handling
-// This addresses the issue where single returns were being wrapped in tables
-
-/* ==================================================================
-   IMPORTANT: The issue is that we DON'T need the marker system.
-   The real problem is simpler - just don't unpack regular tables!
-   
-   Solution: Only create multi-return tables in specific contexts
-   where Lua actually supports multiple returns (function calls in
-   the last position of an assignment list).
-   ==================================================================*/
-
-// 1. KEEP AST_RETURN SIMPLE - just return single values normally
 case AST_RETURN: {
   Value rv = V_nil();
   if(st->as.ret.values.count == 0){
     rv = V_nil();
   } else if(st->as.ret.values.count == 1){
-    // Single return value - return as-is
+
     rv = eval_expr(vm, st->as.ret.values.items[0]);
   } else {
-    // Multiple return values - pack into table WITHOUT marker
-    // We'll handle unpacking at the call site
+
     rv = V_table();
     for(size_t i = 0; i < st->as.ret.values.count; i++){
       Value v = eval_expr(vm, st->as.ret.values.items[i]);
@@ -1524,45 +1504,37 @@ case AST_RETURN: {
   return;
 }
 
-// 2. FIX AST_ASSIGN_LIST - Don't unpack arbitrary tables!
 case AST_ASSIGN_LIST: {
     size_t rn = st->as.massign.rvals.count;
     Value *rv = rn? xmalloc(sizeof(Value)*rn):NULL;
-    
-    // Track which RHS values are function calls (only those can expand)
+
     bool *is_call = rn? xmalloc(sizeof(bool)*rn):NULL;
-    
-    // Evaluate all right-hand side expressions
+
     for(size_t i=0;i<rn;i++) {
         AST *rhs = st->as.massign.rvals.items[i];
         is_call[i] = (rhs && rhs->kind == AST_CALL);
         rv[i]=eval_expr(vm, rhs);
     }
-    
-    // Check if we need to expand the last value
-    // ONLY expand if: 1) it's a call, 2) returns a table, 3) we need more values
+
     Value *all_vals = rv;
     size_t total_vals = rn;
     bool expanded = false;
-    
+
     if(rn > 0 && st->as.massign.lvals.count > rn && is_call[rn-1]){
         Value last = rv[rn-1];
-        // Check if it's a table that looks like multi-return
-        // (has sequential numeric keys starting from 1)
+
         if(last.tag == VAL_TABLE){
             Value test;
             if(tbl_get(last.as.t, V_int(1), &test) && test.tag != VAL_NIL){
-                // Looks like multi-return, expand it
+
                 size_t needed = st->as.massign.lvals.count;
                 all_vals = xmalloc(sizeof(Value) * needed);
                 expanded = true;
-                
-                // Copy first rn-1 values
+
                 for(size_t i=0; i<rn-1; i++){
                     all_vals[i] = rv[i];
                 }
-                
-                // Unpack the table
+
                 size_t idx = rn-1;
                 for(long long j=1; idx < needed; j++){
                     Value v;
@@ -1579,7 +1551,7 @@ case AST_ASSIGN_LIST: {
     for(size_t i=0;i<st->as.massign.lvals.count;i++){
         AST *lhs = st->as.massign.lvals.items[i];
         Value val = (i<total_vals)?all_vals[i]:V_nil();
-        
+
         if(lhs->kind==AST_IDENT){
             Env *owner=NULL; int slot=-1;
             if(env_find(vm->env, lhs->as.ident.name, &owner, &slot)){
@@ -1604,7 +1576,7 @@ case AST_ASSIGN_LIST: {
     break;
 }
 case AST_VAR: {
-  
+
   Value init = st->as.var.init? eval_expr(vm, st->as.var.init): V_nil();
   env_add(vm->env, st->as.var.name, init, st->as.var.is_local);
   if (st->as.var.is_close) {
@@ -1674,10 +1646,9 @@ static const char *default_package_path(void){
   const char *env   = getenv("LUA_PATH");
   if (env54 && *env54) return env54;
   if (env   && *env)   return env;
-  
-  // Add current directory and tests directory to the search path
-  return "?.lua;?/init.lua;"                    // current directory
-         "./?.lua;./?/init.lua;"                 // explicit current
+
+  return "?.lua;?/init.lua;"                    
+         "./?.lua;./?/init.lua;"                 
          "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua;"
          "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua;"
          "/usr/local/lib/luarocks/rocks-5.4/?/init.lua;/usr/local/lib/luarocks/rocks-5.4/?.lua;"
@@ -1776,7 +1747,7 @@ Value builtin_require(struct VM *vm, int argc, Value *argv){
     return V_nil();
   }
   const char *name = argv[0].as.s->data;
-  
+
   Value packageV = ensure_package(vm);
   Value loadedV;
   if (!tbl_get(packageV.as.t, V_str_from_c("loaded"), &loadedV) || loadedV.tag!=VAL_TABLE){
@@ -1810,14 +1781,12 @@ Value builtin_require(struct VM *vm, int argc, Value *argv){
     }
     return V_nil();
   }
-  
-  
+
   AST *program = compile_chunk_from_FILE(fp);
   fclose(fp);
-  
-  // Set sentinel value to prevent infinite recursion
+
   tbl_set(loadedV.as.t, V_str_from_c(name), V_bool(1));
-  
+
   Func *fn = xmalloc(sizeof(*fn));
   memset(fn, 0, sizeof(*fn));
   fn->params = (ASTVec){0};
@@ -1825,16 +1794,15 @@ Value builtin_require(struct VM *vm, int argc, Value *argv){
   fn->body   = program;
   fn->env    = vm->env;
   Value chunk; chunk.tag = VAL_FUNC; chunk.as.fn = fn;
-  
+
   Value ret = call_any(vm, chunk, 0, NULL);
-  
-  // Update with actual return value (or true if module returned nil)
+
   if (ret.tag == VAL_NIL) {
     ret = V_bool(1);
   } else {
   }
   tbl_set(loadedV.as.t, V_str_from_c(name), ret);
-  
+
   if (used_path) free(used_path);
   return ret;
 }
@@ -1849,7 +1817,7 @@ int interpret(AST *root){
   vm.active_co     = NULL;
   vm.err_frame = NULL;
   vm.err_obj   = V_nil();
-    //env_add(vm.env, "package",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_package},   false);
+
   env_add(vm.env, "print",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_print},   false);
   env_add(vm.env, "select",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_select},  false);
   env_add(vm.env, "pairs",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pairs},   false);
@@ -1918,13 +1886,11 @@ int interpret(AST *root){
   exec_stmt(&vm, root);
   return 0;
 }
-// Add these to interpreter.c
 
-// Create a VM for REPL use (persistent across commands)
 VM *vm_create_repl(void) {
     VM *vm = (VM*)malloc(sizeof(VM));
     if (!vm) return NULL;
-    
+
     memset(vm, 0, sizeof(VM));
     vm->env = env_push(NULL);
     vm->co_yielding = false;
@@ -1935,8 +1901,7 @@ VM *vm_create_repl(void) {
     vm->active_co = NULL;
     vm->err_frame = NULL;
     vm->err_obj = V_nil();
-    
-    // Register all built-in functions (same as interpret())
+
     env_add(vm->env, "print", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_print}, false);
     env_add(vm->env, "select", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_select}, false);
     env_add(vm->env, "pairs", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pairs}, false);
@@ -1960,19 +1925,18 @@ VM *vm_create_repl(void) {
     env_add(vm->env, "_VERSION", V_str_from_c("LuaX 1.0"), false);
     env_add(vm->env, "xpcall", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_xpcall}, false);
     env_add(vm->env, "pcall", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pcall}, false);
-    
-    // Initialize package table (same as interpret())
+
     Value package = V_table();
     Value loaded = V_table();
     Value preload = V_table();
     Value searchers = V_table();
-    
+
     const char *lua_path_env = getenv("LUA_PATH");
     const char *rocks_tree1 = "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
     const char *rocks_tree2 = "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua";
     const char *local_tree = "?.lua;?/init.lua;./?.lua;./?/init.lua";
     char path_buf[2048];
-    
+
     if (lua_path_env && *lua_path_env) {
         snprintf(path_buf, sizeof(path_buf), "%s;%s;%s;%s",
                  lua_path_env, local_tree, rocks_tree1, rocks_tree2);
@@ -1980,11 +1944,11 @@ VM *vm_create_repl(void) {
         snprintf(path_buf, sizeof(path_buf), "%s;%s;%s",
                  local_tree, rocks_tree1, rocks_tree2);
     }
-    
+
     const char *lua_cpath_env = getenv("LUA_CPATH");
     const char *cpath_default = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so";
     const char *cpath_final = (lua_cpath_env && *lua_cpath_env) ? lua_cpath_env : cpath_default;
-    
+
     tbl_set(package.as.t, V_str_from_c("loaded"), loaded);
     tbl_set(package.as.t, V_str_from_c("preload"), preload);
     tbl_set(package.as.t, V_str_from_c("searchers"), searchers);
