@@ -1576,8 +1576,6 @@ case AST_ASSIGN_LIST: {
             }
         }
     }
-    
-    // Assign to left-hand side variables
     for(size_t i=0;i<st->as.massign.lvals.count;i++){
         AST *lhs = st->as.massign.lvals.items[i];
         Value val = (i<total_vals)?all_vals[i]:V_nil();
@@ -1599,28 +1597,15 @@ case AST_ASSIGN_LIST: {
             assign_index(vm, t, k, val);
         }
     }
-    
-    // Cleanup
     if(expanded) free(all_vals);
     if(rv) free(rv);
     if(is_call) free(is_call);
     pc++;
     break;
 }
-
-// 3. ALSO NEED TO FIX AST_VAR if it supports multiple variables
-// Add this check after the existing AST_VAR case:
-
 case AST_VAR: {
-  // Check if this is actually a multi-variable declaration
-  // If your parser creates AST_VAR for "local a,b,c = one()",
-  // you might need special handling here too.
   
   Value init = st->as.var.init? eval_expr(vm, st->as.var.init): V_nil();
-  
-  // TODO: If your AST supports multiple variables in one AST_VAR node,
-  // you need to handle unpacking here similar to AST_ASSIGN_LIST
-  
   env_add(vm->env, st->as.var.name, init, st->as.var.is_local);
   if (st->as.var.is_close) {
     Env *owner=NULL; int slot=-1;
@@ -1631,26 +1616,6 @@ case AST_VAR: {
   pc++;
   break;
 }
-
-/* ==================================================================
-   KEY INSIGHT:
-   
-   The real issue is distinguishing between:
-   1. t = {1,2,3}    -- user table
-   2. a,b,c = f()    -- where f() returns multiple values
-   
-   We can only expand case #2 safely. The way to tell them apart is:
-   - Case #2: The RHS is an AST_CALL node
-   - Case #1: The RHS is NOT an AST_CALL node
-   
-   So we ONLY unpack tables when:
-   1. There are fewer RHS expressions than LHS variables
-   2. The LAST RHS expression is an AST_CALL
-   3. That call returned a table
-   
-   This prevents unpacking user-created tables while still supporting
-   multiple return values from functions.
-   ==================================================================*/
       case AST_FUNC_STMT: {
         AST *name = st->as.fnstmt.name;
         Value fval; fval.tag = VAL_FUNC; fval.as.fn = NULL;
@@ -2025,30 +1990,12 @@ VM *vm_create_repl(void) {
     tbl_set(package.as.t, V_str_from_c("searchers"), searchers);
     tbl_set(package.as.t, V_str_from_c("path"), V_str_from_c(path_buf));
     tbl_set(package.as.t, V_str_from_c("cpath"), V_str_from_c(cpath_final));
-    
     env_add(vm->env, "package", package, false);
     env_add(vm->env, "Packages", package, false);
-    
-    // Register all library modules
-    register_package_lib(vm);
-    register_coroutine_lib(vm);
-    register_math_lib(vm);
-    register_string_lib(vm);
-    register_table_lib(vm);
-    register_utf8_lib(vm);
-    register_os_lib(vm);
-    register_io_lib(vm);
-    register_debug_lib(vm);
-    register_random_lib(vm);
-    register_date_lib(vm);
-    register_exception_lib(vm);
-    register_async_lib(vm);
-    register_class_lib(vm);
-    
+    void register_libs(struct VM *vm);  
     return vm;
 }
 
-// Execute a statement in REPL mode (persistent VM)
 void exec_stmt_repl(VM *vm, AST *n) {
     exec_stmt(vm, n);
 }

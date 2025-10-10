@@ -268,7 +268,11 @@ void shim_set_incremental(struct VM *vm, int pause, int stepmul, int stepsize_kb
 void register_coroutine_lib(struct VM *vm);
 void register_async_lib(struct VM *vm);
 void register_class_lib(struct VM *vm);
+void register_libs(struct VM *vm);  
 /* Iterate through table entries - callback gets called for each key/value pair */
 typedef void (*TableIterCallback)(Value key, Value val, void *userdata);
 void tbl_foreach_public(struct Table *t, TableIterCallback callback, void *userdata);
+void load_packages();
+    char path_buf[2048];
+
 #endif /* INTERPRETER_H */
