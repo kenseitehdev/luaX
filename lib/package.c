@@ -6,7 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 
-#include "../include/builtins.h"   // brings interpreter.h / Value / CFunc etc.
+#include "../include/interpreter.h"   // brings interpreter.h / Value / CFunc etc.
 
 /* If you have a real file loader, compile with -DHAVE_VM_LOAD_AND_RUN_FILE
    and provide: Value vm_load_and_run_file(VM*, const char*, const char*);
@@ -399,7 +399,7 @@ static Value c_module_loader(VM *vm2, int cargc, Value *cargv) {
 
 /* ===== require(name) ===== */
 
-static Value builtin_require(VM *vm, int argc, Value *argv) {
+Value builtin_require(VM *vm, int argc, Value *argv) {
   if (argc < 1 || argv[0].tag != VAL_STR) {
     return V_str_from_c("require: module name must be a string");
   }

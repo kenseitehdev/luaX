@@ -9,61 +9,7 @@
 #include "../include/builtins.h"
 #include "../include/lexer.h"
 #include "../include/err.h"
-#define STACK_MAX 256
-
-void tbl_foreach_public(struct Table *t, TableIterCallback callback, void *userdata) {
-    if (!t || !callback) return;
-    for (int i = 0; i < t->cap; i++) {
-        for (TableEntry *e = t->buckets[i]; e; e = e->next) {
-            callback(e->key, e->val, userdata);
-        }
-    }
-}
-static Value vm_pop(VM *vm) {
-    if (vm->top < 0) {
-        vm_raise(vm, V_str_from_c("stack underflow"));
-    }
-    return vm->stack[vm->top--];
-}
-
-static void vm_push(VM *vm, Value v) {
-    if (vm->top >= STACK_MAX - 1) {
-        vm_raise(vm, V_str_from_c("stack overflow"));
-    }
-    vm->stack[++vm->top] = v;
-}
-static void *xmalloc(size_t n){ void *p=malloc(n); if(!p){fprintf(stderr,"OOM\n"); exit(1);} return p; }
-static char *xstrdup(const char*s){ if(!s) s=""; size_t n=strlen(s)+1; char *p=xmalloc(n); memcpy(p,s,n); return p; }
-static Value op_len(Value v){
-  if (v.tag == VAL_STR)  return V_int(v.as.s->len);
-  if (v.tag == VAL_TABLE){
-    long long n = 0, i = 1; Value out;
-    while (tbl_get(v.as.t, V_int(i), &out)) { n++; i++; }
-    return V_int(n);
-  }
-  return V_int(0);
-}
-static FILE* open_string_as_FILE(const char *code) {
-    if (!code) code = "";
-#if defined(_GNU_SOURCE) || defined(__GLIBC__)
-    FILE *f = fmemopen((void*)code, strlen(code), "r");
-    if (f) return f;
-#endif
-    FILE *f = tmpfile();
-    if (!f) return NULL;
-    size_t len = strlen(code);
-    if (len && fwrite(code, 1, len, f) != len) { fclose(f); return NULL; }
-    rewind(f);
-    return f;
-}
-Value V_nil(void){ Value v={.tag=VAL_NIL}; return v; }
-Value V_bool(bool b){ Value v={.tag=VAL_BOOL}; v.as.b=b?1:0; return v; }
-Value V_int(long long x){ Value v={.tag=VAL_INT}; v.as.i=x; return v; }
-Value V_num(double x){ Value v={.tag=VAL_NUM}; v.as.n=x; return v; }
-static Str *Str_new_len(const char *s,int len){ Str *st=xmalloc(sizeof(*st)); st->len=len; st->data=xmalloc(len+1); if(s&&len) memcpy(st->data,s,len); st->data[len]='\0'; return st; }
-Value V_str_from_c(const char *s){ if(!s) s=""; return (Value){.tag=VAL_STR,.as.s=Str_new_len(s,(int)strlen(s))}; }
-static unsigned long long hash_mix(unsigned long long x){ x ^= x>>33; x*=0xff51afd7ed558ccdULL; x ^= x>>33; x*=0xc4ceb9fe1a85ec53ULL; x ^= x>>33; return x; }
-static unsigned long long hash_value(Value v){
+unsigned long long hash_value(Value v){
   switch(v.tag){
     case VAL_NIL:  return 1469598103934665603ULL;
     case VAL_BOOL: return v.as.b?0x9e3779b97f4a7c15ULL:0x51d7348a2f0f3ad9ULL;
@@ -86,12 +32,6 @@ static unsigned long long hash_value(Value v){
     default: return 0x12345678ULL;
   }
 }
-static Table *tbl_new(void){
-  Table *t=xmalloc(sizeof(*t));
-  t->cap=32; t->buckets=xmalloc(sizeof(TableEntry*)*t->cap);
-  for(int i=0;i<t->cap;i++) t->buckets[i]=NULL;
-  return t;
-}
 Value V_table(void){ return (Value){.tag=VAL_TABLE,.as.t=tbl_new()}; }
 int value_equal(Value a, Value b){
   if(a.tag!=b.tag){
@@ -107,76 +47,6 @@ int value_equal(Value a, Value b){
     case VAL_STR: return a.as.s->len==b.as.s->len && memcmp(a.as.s->data,b.as.s->data,a.as.s->len)==0;
     default: return a.as.t==b.as.t;
   }
-}
-void tbl_set(Table *t, Value key, Value val){
-  unsigned long long h=hash_value(key);
-  int idx = (int)(h % t->cap);
-  for(TableEntry *e=t->buckets[idx]; e; e=e->next){
-    if(value_equal(e->key,key)){ e->val=val; return; }
-  }
-  TableEntry *ne=xmalloc(sizeof(*ne));
-  ne->key=key; ne->val=val; ne->next=t->buckets[idx];
-  t->buckets[idx]=ne;
-}
-int tbl_get(Table *t, Value key, Value *out){
-  unsigned long long h=hash_value(key);
-  int idx = (int)(h % t->cap);
-  for(TableEntry *e=t->buckets[idx]; e; e=e->next){
-    if(value_equal(e->key,key)){ *out=e->val; return 1; }
-  }
-  return 0;
-}
-static Env *env_push(Env *parent){
-  Env *e=xmalloc(sizeof(*e));
-  e->parent=parent; e->count=0; e->cap=8;
-  e->names=xmalloc(sizeof(char*)*e->cap);
-  e->vals =xmalloc(sizeof(Value)*e->cap);
-  e->is_local=xmalloc(sizeof(bool)*e->cap);
-  e->closers = NULL;
-  e->ccount  = 0;
-  e->ccap    = 0;
-  return e;
-}
-void env_add(Env *e, const char *name, Value v, bool is_local){
-  if(e->count==e->cap){
-    e->cap*=2;
-    e->names=realloc(e->names,sizeof(char*)*e->cap);
-    e->vals =realloc(e->vals ,sizeof(Value)*e->cap);
-    e->is_local=realloc(e->is_local,sizeof(bool)*e->cap);
-  }
-  e->names[e->count]=xstrdup(name);
-  e->vals [e->count]=v;
-  e->is_local[e->count]=is_local;
-  e->count++;
-}
-static int env_set(Env *e, const char *name, Value v){
-  for(Env *cur=e; cur; cur=cur->parent){
-    for(int i=0;i<cur->count;i++){
-      if(strcmp(cur->names[i],name)==0){ cur->vals[i]=v; return 1; }
-    }
-  }
-  return 0;
-}
-int env_get(Env *e, const char *name, Value *out){
-  for(Env *cur=e; cur; cur=cur->parent){
-    for(int i=0;i<cur->count;i++){
-      if(strcmp(cur->names[i],name)==0){ *out=cur->vals[i]; return 1; }
-    }
-  }
-  return 0;
-}
-static int env_find(Env *e, const char *name, Env **owner, int *slot){
-  for(Env *cur=e; cur; cur=cur->parent){
-    for(int i=0;i<cur->count;i++){
-      if(strcmp(cur->names[i],name)==0){ if(owner)*owner=cur; if(slot)*slot=i; return 1; }
-    }
-  }
-  return 0;
-}
-Env* env_root(Env *e){
-  if(!e) return NULL;
-  while(e->parent) e = e->parent;
-  return e;
 }
 static void print_value(Value v){
   switch(v.tag){
@@ -542,7 +412,7 @@ static Value tostring_default(Value v) {
       return V_str_from_c("<value>");
   }
 }
-static Value builtin_tostring(struct VM *vm, int argc, Value *argv){
+Value builtin_tostring(struct VM *vm, int argc, Value *argv){
   if (argc < 1) return V_str_from_c("");
   Value mm = mm_of(argv[0], "__tostring");
   if (mm.tag != VAL_NIL){
@@ -551,7 +421,7 @@ static Value builtin_tostring(struct VM *vm, int argc, Value *argv){
   }
   return tostring_default(argv[0]);
 }
-static Value builtin_print(struct VM *vm, int argc, Value *argv){
+Value builtin_print(struct VM *vm, int argc, Value *argv){
   for (int i = 0; i < argc; i++) {
     if (i) printf("\t");
     Value s = builtin_tostring(vm, 1, &argv[i]);
@@ -561,7 +431,7 @@ static Value builtin_print(struct VM *vm, int argc, Value *argv){
   printf("\n");
   return V_nil();
 }
-static Value builtin_type(struct VM *vm, int argc, Value *argv){
+Value builtin_type(struct VM *vm, int argc, Value *argv){
   (void)vm; if (argc<1) return V_str_from_c("nil");
   switch(argv[0].tag){
     case VAL_NIL: return V_str_from_c("nil");
@@ -614,7 +484,7 @@ static AST* compile_chunk_from_FILE(FILE *fp){
   parser_destroy(p);
   return program;
 }
-static Value builtin_load(struct VM *vm, int argc, Value *argv){
+Value builtin_load(struct VM *vm, int argc, Value *argv){
   if (argc<1 || argv[0].tag!=VAL_STR) return V_nil();
   FILE *fp = open_string_as_FILE(argv[0].as.s->data);
   if (!fp) return V_nil();
@@ -624,7 +494,7 @@ static Value builtin_load(struct VM *vm, int argc, Value *argv){
   fn->params=(ASTVec){0}; fn->vararg=false; fn->body=program; fn->env=vm->env;
   Value v; v.tag=VAL_FUNC; v.as.fn=fn; return v;
 }
-static Value builtin_loadfile(struct VM *vm, int argc, Value *argv){
+Value builtin_loadfile(struct VM *vm, int argc, Value *argv){
   if (argc<1 || argv[0].tag!=VAL_STR) return V_nil();
   size_t n=0; char *src = read_entire_file(argv[0].as.s->data, &n);
   if (!src) { fprintf(stderr,"[LuaX]: loadfile: cannot open '%s'\n", argv[0].as.s->data); return V_nil(); }
@@ -637,7 +507,7 @@ static Value builtin_loadfile(struct VM *vm, int argc, Value *argv){
   fn->params=(ASTVec){0}; fn->vararg=false; fn->body=program; fn->env=vm->env;
   Value v; v.tag=VAL_FUNC; v.as.fn=fn; return v;
 }
-static Value builtin_pcall(struct VM *vm, int argc, Value *argv){
+Value builtin_pcall(struct VM *vm, int argc, Value *argv){
   if (argc < 1 || !is_callable(argv[0])) {
     Value tup = V_table();
     tbl_set(tup.as.t, V_int(1), V_bool(0));
@@ -662,7 +532,7 @@ static Value builtin_pcall(struct VM *vm, int argc, Value *argv){
     return tup;
   }
 }
-static Value builtin_xpcall(struct VM *vm, int argc, Value *argv){
+Value builtin_xpcall(struct VM *vm, int argc, Value *argv){
   if (argc < 2 || !is_callable(argv[0]) || !is_callable(argv[1])) {
     Value tup = V_table();
     tbl_set(tup.as.t, V_int(1), V_bool(0));
@@ -1741,71 +1611,6 @@ static FILE *search_module_file(Value packageV, const char *name, char **used_pa
   free(modpath);
   return NULL;
 }
-Value builtin_require(struct VM *vm, int argc, Value *argv){
-  if (argc < 1 || argv[0].tag != VAL_STR) {
-    fprintf(stderr, "[LuaX]: require: expected string argument\n");
-    return V_nil();
-  }
-  const char *name = argv[0].as.s->data;
-
-  Value packageV = ensure_package(vm);
-  Value loadedV;
-  if (!tbl_get(packageV.as.t, V_str_from_c("loaded"), &loadedV) || loadedV.tag!=VAL_TABLE){
-    loadedV = V_table();
-    tbl_set(packageV.as.t, V_str_from_c("loaded"), loadedV);
-  }
-  Value already;
-  if (tbl_get(loadedV.as.t, V_str_from_c(name), &already)){
-    fprintf(stderr, "[LuaX]: module '%s' already loaded, returning cached value (tag=%d)\n", name, already.tag);
-    return already;
-  }
-  Value preloadV;
-  if (!tbl_get(packageV.as.t, V_str_from_c("preload"), &preloadV) || preloadV.tag!=VAL_TABLE){
-    preloadV = V_table();
-    tbl_set(packageV.as.t, V_str_from_c("preload"), preloadV);
-  }
-  Value loader;
-  if (tbl_get(preloadV.as.t, V_str_from_c(name), &loader) && is_callable(loader)){
-    Value ret = call_any(vm, loader, 0, NULL);
-    if (ret.tag == VAL_NIL) ret = V_bool(1);
-    tbl_set(loadedV.as.t, V_str_from_c(name), ret);
-    return ret;
-  }
-  char *used_path = NULL;
-  FILE *fp = search_module_file(packageV, name, &used_path);
-  if (!fp){
-    Value pathV;
-    if (packageV.tag==VAL_TABLE &&
-        tbl_get(packageV.as.t, V_str_from_c("path"), &pathV) &&
-        pathV.tag==VAL_STR){
-    }
-    return V_nil();
-  }
-
-  AST *program = compile_chunk_from_FILE(fp);
-  fclose(fp);
-
-  tbl_set(loadedV.as.t, V_str_from_c(name), V_bool(1));
-
-  Func *fn = xmalloc(sizeof(*fn));
-  memset(fn, 0, sizeof(*fn));
-  fn->params = (ASTVec){0};
-  fn->vararg = false;
-  fn->body   = program;
-  fn->env    = vm->env;
-  Value chunk; chunk.tag = VAL_FUNC; chunk.as.fn = fn;
-
-  Value ret = call_any(vm, chunk, 0, NULL);
-
-  if (ret.tag == VAL_NIL) {
-    ret = V_bool(1);
-  } else {
-  }
-  tbl_set(loadedV.as.t, V_str_from_c(name), ret);
-
-  if (used_path) free(used_path);
-  return ret;
-}
 int interpret(AST *root){
   VM vm; memset(&vm,0,sizeof(vm));
   vm.env = env_push(NULL);
@@ -1886,80 +1691,6 @@ int interpret(AST *root){
   exec_stmt(&vm, root);
   return 0;
 }
-
-VM *vm_create_repl(void) {
-    VM *vm = (VM*)malloc(sizeof(VM));
-    if (!vm) return NULL;
-
-    memset(vm, 0, sizeof(VM));
-    vm->env = env_push(NULL);
-    vm->co_yielding = false;
-    vm->co_yield_vals = V_table();
-    vm->co_point.blk = NULL;
-    vm->co_point.pc = 0;
-    vm->co_call_env = NULL;
-    vm->active_co = NULL;
-    vm->err_frame = NULL;
-    vm->err_obj = V_nil();
-
-    env_add(vm->env, "print", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_print}, false);
-    env_add(vm->env, "select", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_select}, false);
-    env_add(vm->env, "pairs", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pairs}, false);
-    env_add(vm->env, "ipairs", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_ipairs}, false);
-    env_add(vm->env, "assert", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_assert}, false);
-    env_add(vm->env, "collectgarbage", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_collectgarbage}, false);
-    env_add(vm->env, "error", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_error}, false);
-    env_add(vm->env, "_G", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin__G}, false);
-    env_add(vm->env, "getmetatable", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_getmetatable}, false);
-    env_add(vm->env, "setmetatable", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_setmetatable}, false);
-    env_add(vm->env, "rawequal", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawequal}, false);
-    env_add(vm->env, "rawget", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawget}, false);
-    env_add(vm->env, "rawset", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawset}, false);
-    env_add(vm->env, "load", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_load}, false);
-    env_add(vm->env, "loadfile", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_loadfile}, false);
-    env_add(vm->env, "require", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_require}, false);
-    env_add(vm->env, "next", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_next}, false);
-    env_add(vm->env, "tonumber", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tonumber}, false);
-    env_add(vm->env, "tostring", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tostring}, false);
-    env_add(vm->env, "type", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_type}, false);
-    env_add(vm->env, "_VERSION", V_str_from_c("LuaX 1.0"), false);
-    env_add(vm->env, "xpcall", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_xpcall}, false);
-    env_add(vm->env, "pcall", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pcall}, false);
-
-    Value package = V_table();
-    Value loaded = V_table();
-    Value preload = V_table();
-    Value searchers = V_table();
-
-    const char *lua_path_env = getenv("LUA_PATH");
-    const char *rocks_tree1 = "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
-    const char *rocks_tree2 = "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua";
-    const char *local_tree = "?.lua;?/init.lua;./?.lua;./?/init.lua";
-    char path_buf[2048];
-
-    if (lua_path_env && *lua_path_env) {
-        snprintf(path_buf, sizeof(path_buf), "%s;%s;%s;%s",
-                 lua_path_env, local_tree, rocks_tree1, rocks_tree2);
-    } else {
-        snprintf(path_buf, sizeof(path_buf), "%s;%s;%s",
-                 local_tree, rocks_tree1, rocks_tree2);
-    }
-
-    const char *lua_cpath_env = getenv("LUA_CPATH");
-    const char *cpath_default = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so";
-    const char *cpath_final = (lua_cpath_env && *lua_cpath_env) ? lua_cpath_env : cpath_default;
-
-    tbl_set(package.as.t, V_str_from_c("loaded"), loaded);
-    tbl_set(package.as.t, V_str_from_c("preload"), preload);
-    tbl_set(package.as.t, V_str_from_c("searchers"), searchers);
-    tbl_set(package.as.t, V_str_from_c("path"), V_str_from_c(path_buf));
-    tbl_set(package.as.t, V_str_from_c("cpath"), V_str_from_c(cpath_final));
-    env_add(vm->env, "package", package, false);
-    env_add(vm->env, "Packages", package, false);
-    void register_libs(struct VM *vm);  
-    return vm;
-}
-
 void exec_stmt_repl(VM *vm, AST *n) {
     exec_stmt(vm, n);
 }

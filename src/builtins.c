@@ -47,11 +47,20 @@ Value builtin_setmetatable(struct VM *vm, int argc, Value *argv){
 }
 
 Value builtin_assert(struct VM *vm, int argc, Value *argv){
-  if (argc < 1) return V_bool(1);
-  if (as_truthy(argv[0])) return argv[0];
-  const char *msg = (argc >= 2 && argv[1].tag==VAL_STR) ? argv[1].as.s->data : "assertion failed!";
-  vm_raise(vm, V_str_from_c(msg));
-  return V_nil(); 
+  if (argc < 1) {
+    vm_raise(vm, V_str_from_c("assertion failed!"));
+    return V_nil();
+  }
+  
+  if (!as_truthy(argv[0])) {
+    const char *msg = (argc >= 2 && argv[1].tag == VAL_STR) 
+                      ? argv[1].as.s->data 
+                      : "assertion failed!";
+    vm_raise(vm, V_str_from_c(msg));
+    return V_nil();
+  }
+  
+  return argv[0];
 }
 
 Value builtin_collectgarbage(struct VM *vm, int argc, Value *argv){

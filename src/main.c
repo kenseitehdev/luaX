@@ -5,6 +5,7 @@
 #include <errno.h>
 #include "../include/lexer.h"
 #include "../include/parser.h"
+#include "../include/util.h"
 #include "../include/interpreter.h"
 
 #define LUAX_VERSION "0.1.0"
@@ -89,20 +90,6 @@ static int allowed_ext(const char *path) {
     return has_ext(path, ".lua") || has_ext(path, ".lx");
 }
 
-/* Turn a string into a seekable FILE* (tmpfile fallback if fmemopen not available) */
-static FILE* open_string_as_FILE(const char *code) {
-    if (!code) code = "";
-#if defined(_GNU_SOURCE) || defined(__GLIBC__)
-    FILE *f = fmemopen((void*)code, strlen(code), "r");
-    if (f) return f;
-#endif
-    FILE *f = tmpfile();
-    if (!f) return NULL;
-    size_t len = strlen(code);
-    if (len && fwrite(code, 1, len, f) != len) { fclose(f); return NULL; }
-    rewind(f);
-    return f;
-}
 
 /* Read all of stdin into a single malloc'd string */
 static char* read_all_stdin(void){

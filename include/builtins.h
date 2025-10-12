@@ -8,7 +8,7 @@
 #define MT_STORE   "_mt"
 #define PROT_KEY   "__metatable"
 Value builtin_select(struct VM *vm, int argc, Value *argv);
-static Value builtin_require(struct VM *vm, int argc, Value *argv);
+Value builtin_require(struct VM *vm, int argc, Value *argv);
 Value builtin_getmetatable(struct VM *vm, int argc, Value *argv);
 Value builtin_setmetatable(struct VM *vm, int argc, Value *argv);
 Value builtin_assert(struct VM *vm, int argc, Value *argv);

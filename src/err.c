@@ -1,6 +1,7 @@
 #include "../include/err.h"
 void vm_err_push(struct VM *vm, ErrFrame *f){
   f->prev = (ErrFrame*)vm->err_frame;
+  f->env_at_push = vm->env;  // ← ADD THIS LINE
   vm->err_frame = f;
 }
 void vm_err_pop(struct VM *vm){

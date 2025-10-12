@@ -5,11 +5,10 @@
 #include <stdbool.h>
 #include "parser.h"  /* for AST, ASTKind, ASTVec, etc. */
 typedef struct Coroutine Coroutine; /* fwd so VM can refer to it */
-
 typedef enum {
   VAL_NIL, VAL_BOOL, VAL_INT, VAL_NUM, VAL_STR, VAL_TABLE,
   VAL_COROUTINE,
-  VAL_CFUNC,          /* native/builtin C function */
+  VAL_CFUNC,          /* builtin C function */
   VAL_FUNC,           /* user-defined Lua function (closure) */
   VAL_MULTI           /* multiple-return bundle */
 } ValTag;
@@ -274,5 +273,24 @@ typedef void (*TableIterCallback)(Value key, Value val, void *userdata);
 void tbl_foreach_public(struct Table *t, TableIterCallback callback, void *userdata);
 void load_packages();
     char path_buf[2048];
-
+extern void *xmalloc(size_t n);
+extern char *xstrdup(const char *s);
+extern Value op_len(Value v);
+extern FILE *open_string_as_FILE(const char *code);
+extern Value V_nil(void);
+extern Value V_bool(bool b);
+extern Value V_int(long long x);
+extern Value V_num(double x);
+extern Str *Str_new_len(const char *s, int len);
+extern Value V_str_from_c(const char *s);
+extern unsigned long long hash_mix(unsigned long long x);
+extern void vm_push(struct VM *vm, Value v);
+extern Value vm_pop(struct VM *vm);
+extern Table *tbl_new(void);
+extern void env_add(Env *e, const char *name, Value v, bool is_local);
+extern int env_get(Env *e, const char *name, Value *out);
+extern Env* env_root(Env *e);
+extern Env* env_push(Env *parent);
+extern int env_set(Env *e, const char *name, Value v);
+extern int env_find(Env *e, const char *name, Env **owner, int *slot);
 #endif /* INTERPRETER_H */
