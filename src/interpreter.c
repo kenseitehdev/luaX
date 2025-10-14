@@ -381,7 +381,7 @@ Value builtin_type(struct VM *vm, int argc, Value *argv){
 }
 static Value builtin__VERSION(struct VM *vm, int argc, Value *argv){
   (void)vm;(void)argc;(void)argv;
-  return V_str_from_c("LuaX 1.0");
+  return V_str_from_c("LuaX 1.0.2");
 }
 static char* read_entire_file(const char *path, size_t *out_len){
     FILE *f = fopen(path, "rb");
@@ -1579,7 +1579,7 @@ int interpret(AST *root){
   env_add(vm.env, "tonumber",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tonumber},       false);
   env_add(vm.env, "tostring",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tostring},       false);
   env_add(vm.env, "type",           (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_type},           false);
-  env_add(vm.env, "_VERSION",       V_str_from_c("LuaX 1.0"),                                 false);
+  env_add(vm.env, "_VERSION",       V_str_from_c("LuaX 1.0.2"),                                 false);
   env_add(vm.env, "xpcall",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_xpcall},         false);
   env_add(vm.env, "pcall",          (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pcall},          false);
   {
