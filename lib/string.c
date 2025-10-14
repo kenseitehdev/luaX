@@ -1,4 +1,5 @@
 // lib/string.c - Production-level Lua-compatible string library
+// NEED TO IMPLEMENT REGEX
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
