@@ -4,6 +4,8 @@
 #include <setjmp.h>
 #include <stdlib.h>
 #include "env.h"  /* for Env, VM, Value */
+#include "interpreter.h"
+#include "table.h"
 
 
 typedef struct ErrFrame {

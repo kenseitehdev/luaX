@@ -7,7 +7,7 @@ BUILD_DIR := build
 
 # Tools
 CC        := gcc
-CFLAGS    := -std=c11 -Wall -Wextra -O2 -I$(INC_DIR)
+CFLAGS    := -std=c11 -Wall -Wextra -O2 -I$(INC_DIR) -DHAVE_VM_LOAD_AND_RUN_FILE
 LDFLAGS   := -lm
 STRIP     := strip
 INSTALL   ?= install

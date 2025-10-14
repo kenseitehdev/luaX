@@ -193,70 +193,6 @@ int to_int_val(Value v, int dflt){
   if (v.tag == VAL_NUM) return (int)v.as.n;
   return dflt;
 }
-void shim_collect(struct VM *vm){ vm_gc_collect(vm); g_gc.tick = 0; }
-void shim_stop(struct VM *vm){ vm_gc_stop(vm); g_gc.running = 0; }
-void shim_restart(struct VM *vm){ vm_gc_restart(vm); g_gc.running = 1; }
-int  shim_isrunning(struct VM *vm){ int r = vm_gc_isrunning(vm); return r ? r : g_gc.running; }
-int  shim_step(struct VM *vm, int kb){
-  int done = vm_gc_step(vm, kb);
-  if (done) return done;
-  g_gc.tick++;
-  return (g_gc.tick % 8 == 0) ? 1 : 0; 
-}
-int  shim_setpause(struct VM *vm, int pause){
-  int old = vm_gc_setpause(vm, pause);
-  if (old == 0) { old = g_gc.pause; if (pause > 0) g_gc.pause = pause; }
-  return old;
-}
-int  shim_setstepmul(struct VM *vm, int mul){
-  int old = vm_gc_setstepmul(vm, mul);
-  if (old == 0) { old = g_gc.stepmul; if (mul > 0) g_gc.stepmul = mul; }
-  return old;
-}
-void shim_set_incremental(struct VM *vm, int pause, int stepmul, int stepsize_kb){
-  vm_gc_set_incremental(vm, pause, stepmul, stepsize_kb);
-  g_gc.mode = GC_MODE_INCREMENTAL;
-  if (pause > 0) g_gc.pause = pause;
-  if (stepmul > 0) g_gc.stepmul = stepmul;
-  if (stepsize_kb > 0) g_gc.stepsize_kb = stepsize_kb;
-}
-void shim_set_generational(struct VM *vm, int minormul, int majormul){
-  vm_gc_set_generational(vm, minormul, majormul);
-  g_gc.mode = GC_MODE_GENERATIONAL;
-  if (minormul > 0) g_gc.minormul = minormul;
-  if (majormul > 0) g_gc.majormul = majormul;
-}
-static Value call_debug_traceback(struct VM *vm, Value msg, int level) {
-  Value dbg;
-  if (!env_get(vm->env, "debug", &dbg) || dbg.tag != VAL_TABLE) {
-    return msg;
-  }
-  Value tb;
-  if (!tbl_get(dbg.as.t, V_str_from_c("traceback"), &tb) || !is_callable(tb)) {
-    return msg;
-  }
-  Value args[2];
-  int argc = 1;
-  args[0] = msg;
-  if (level >= 0) { args[1] = V_int((long long)level); argc = 2; }
-  Value out = call_any(vm, tb, argc, args);
-  return (out.tag == VAL_STR) ? out : msg;
-}
-Value builtin_error(struct VM *vm, int argc, Value *argv){
-  Value obj = (argc >= 1) ? argv[0] : V_str_from_c("error");
-  int level = 1;
-  if (argc >= 2) {
-    if (argv[1].tag == VAL_INT) level = (int)argv[1].as.i;
-    else if (argv[1].tag == VAL_NUM) level = (int)argv[1].as.n;
-  }
-  if (obj.tag == VAL_STR) {
-    Value traced = call_debug_traceback(vm, obj, level);
-    vm_raise(vm, traced);
-    return V_nil();
-  }
-  vm_raise(vm, obj);
-  return V_nil();
-}
 Value builtin__G(struct VM *vm, int argc, Value *argv){
   (void)argc;(void)argv;
   Env *root = env_root(vm->env);
@@ -1663,9 +1599,16 @@ int interpret(AST *root){
       snprintf(path_buf, sizeof(path_buf), "%s;%s;%s",
                local_tree, rocks_tree1, rocks_tree2);
     }
-    const char *lua_cpath_env = getenv("LUA_CPATH");
-    const char *cpath_default = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so";
-    const char *cpath_final   = (lua_cpath_env && *lua_cpath_env) ? lua_cpath_env : cpath_default;
+const char *lua_cpath_env = getenv("LUA_CPATH");
+const char *cpath_default = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so";
+char cpath_buf[2048];
+const char *cpath_final;
+if (lua_cpath_env && *lua_cpath_env) {
+  snprintf(cpath_buf, sizeof(cpath_buf), "%s;%s", lua_cpath_env, cpath_default);
+  cpath_final = cpath_buf;
+} else {
+  cpath_final = cpath_default;
+}
     tbl_set(package.as.t, V_str_from_c("loaded"),    loaded);
     tbl_set(package.as.t, V_str_from_c("preload"),   preload);
     tbl_set(package.as.t, V_str_from_c("searchers"), searchers);
@@ -1691,6 +1634,29 @@ int interpret(AST *root){
   exec_stmt(&vm, root);
   return 0;
 }
-void exec_stmt_repl(VM *vm, AST *n) {
-    exec_stmt(vm, n);
+void exec_stmt_repl(VM *vm, AST *n) {exec_stmt(vm, n);}
+Value vm_load_and_run_file(VM *vm, const char *path, const char *modname) {
+    (void)modname; 
+    size_t n = 0;
+    char *src = read_entire_file(path, &n);
+    if (!src) {
+        char err_buf[512];
+        snprintf(err_buf, sizeof(err_buf), "cannot open file '%s'", path);
+        return V_str_from_c(err_buf);
+    }
+    FILE *fp = open_string_as_FILE(src);
+    free(src);
+    if (!fp) {
+        return V_str_from_c("failed to create string FILE");
+    }
+    AST *program = compile_chunk_from_FILE(fp);
+    fclose(fp);
+    Func *fn = xmalloc(sizeof(*fn));
+    memset(fn, 0, sizeof(*fn));
+    fn->params = (ASTVec){0};
+    fn->vararg = false;
+    fn->body = program;
+    fn->env = vm->env;
+    Value result = call_function(vm, fn, 0, NULL);
+    return (result.tag == VAL_NIL) ? V_bool(true) : result;
 }

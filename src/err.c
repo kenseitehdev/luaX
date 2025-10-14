@@ -26,3 +26,36 @@ for (Env *e = vm->env; e; e = e->parent) {
     }
     longjmp(top->jb, 1);
 }
+
+Value call_debug_traceback(struct VM *vm, Value msg, int level) {
+  Value dbg;
+  if (!env_get(vm->env, "debug", &dbg) || dbg.tag != VAL_TABLE) {
+    return msg;
+  }
+  Value tb;
+  if (!tbl_get(dbg.as.t, V_str_from_c("traceback"), &tb) || !is_callable(tb)) {
+    return msg;
+  }
+  Value args[2];
+  int argc = 1;
+  args[0] = msg;
+  if (level >= 0) { args[1] = V_int((long long)level); argc = 2; }
+  Value out = call_any(vm, tb, argc, args);
+  return (out.tag == VAL_STR) ? out : msg;
+}
+Value builtin_error(struct VM *vm, int argc, Value *argv){
+  Value obj = (argc >= 1) ? argv[0] : V_str_from_c("error");
+  int level = 1;
+  if (argc >= 2) {
+    if (argv[1].tag == VAL_INT) level = (int)argv[1].as.i;
+    else if (argv[1].tag == VAL_NUM) level = (int)argv[1].as.n;
+  }
+  if (obj.tag == VAL_STR) {
+    Value traced = call_debug_traceback(vm, obj, level);
+    vm_raise(vm, traced);
+    return V_nil();
+  }
+  vm_raise(vm, obj);
+  return V_nil();
+}
+
