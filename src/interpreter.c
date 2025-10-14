@@ -330,7 +330,7 @@ static Value tostring_default(Value v) {
       snprintf(buf, sizeof(buf), "%lld", (long long)v.as.i);
       return V_str_from_c(buf);
     case VAL_NUM:
-      snprintf(buf, sizeof(buf), "%.17g", v.as.n);
+      snprintf(buf, sizeof(buf), "%.13g", v.as.n);
       return V_str_from_c(buf);
     case VAL_STR:
       return v;
