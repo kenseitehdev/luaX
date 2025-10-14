@@ -98,6 +98,14 @@ static Value m_atan(struct VM*vm,int argc,Value*argv){
   return V_num(atan2(to_double(argv[0]), to_double(argv[1]))); /* atan(y,x) */
 }
 static Value m_exp (struct VM*vm,int argc,Value*argv){ (void)vm; if(argc<1||!is_num(argv[0]))return V_nil(); return V_num(exp (to_double(argv[0]))); }
+
+/* ---- ln (natural logarithm) ---- */
+static Value m_ln(struct VM*vm,int argc,Value*argv){
+  (void)vm; if(argc<1||!is_num(argv[0])) return V_nil();
+  return V_num(log(to_double(argv[0])));
+}
+
+/* ---- log (natural log or with custom base) ---- */
 static Value m_log (struct VM*vm,int argc,Value*argv){
   (void)vm; if(argc<1||!is_num(argv[0])) return V_nil();
   double x = to_double(argv[0]);
@@ -107,6 +115,13 @@ static Value m_log (struct VM*vm,int argc,Value*argv){
   }
   return V_num(log(x)); /* natural log */
 }
+
+/* ---- log10 (base-10 logarithm) ---- */
+static Value m_log10(struct VM*vm,int argc,Value*argv){
+  (void)vm; if(argc<1||!is_num(argv[0])) return V_nil();
+  return V_num(log10(to_double(argv[0])));
+}
+
 static Value m_sqrt(struct VM*vm,int argc,Value*argv){ (void)vm; if(argc<1||!is_num(argv[0]))return V_nil(); return V_num(sqrt(to_double(argv[0]))); }
 static Value m_pow (struct VM*vm,int argc,Value*argv){
   (void)vm; if(argc<2||!is_num(argv[0])||!is_num(argv[1]))return V_nil();
@@ -198,6 +213,7 @@ void register_math_lib(struct VM *vm){
 
   /* constants */
   tbl_set_public(t.as.t, V_str_from_c("pi"),          V_num(M_PI));
+  tbl_set_public(t.as.t, V_str_from_c("e"),           V_num(M_E));
   tbl_set_public(t.as.t, V_str_from_c("huge"),        V_num(HUGE_VAL));
   tbl_set_public(t.as.t, V_str_from_c("infinity"),    V_num(INFINITY));
   tbl_set_public(t.as.t, V_str_from_c("maxinteger"),  V_int(LLONG_MAX));
@@ -217,7 +233,9 @@ void register_math_lib(struct VM *vm){
   tbl_set_public(t.as.t, V_str_from_c("acos"),       (Value){.tag=VAL_CFUNC,.as.cfunc=m_acos});
   tbl_set_public(t.as.t, V_str_from_c("atan"),       (Value){.tag=VAL_CFUNC,.as.cfunc=m_atan});
   tbl_set_public(t.as.t, V_str_from_c("exp"),        (Value){.tag=VAL_CFUNC,.as.cfunc=m_exp});
+  tbl_set_public(t.as.t, V_str_from_c("ln"),         (Value){.tag=VAL_CFUNC,.as.cfunc=m_ln});
   tbl_set_public(t.as.t, V_str_from_c("log"),        (Value){.tag=VAL_CFUNC,.as.cfunc=m_log});
+  tbl_set_public(t.as.t, V_str_from_c("log10"),      (Value){.tag=VAL_CFUNC,.as.cfunc=m_log10});
   tbl_set_public(t.as.t, V_str_from_c("sqrt"),       (Value){.tag=VAL_CFUNC,.as.cfunc=m_sqrt});
   tbl_set_public(t.as.t, V_str_from_c("pow"),        (Value){.tag=VAL_CFUNC,.as.cfunc=m_pow});
   tbl_set_public(t.as.t, V_str_from_c("deg"),        (Value){.tag=VAL_CFUNC,.as.cfunc=m_deg});
