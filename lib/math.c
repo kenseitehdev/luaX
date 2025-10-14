@@ -1,4 +1,3 @@
-
 // lib/math.c
 #include <math.h>
 #include <stdlib.h>
@@ -200,6 +199,7 @@ void register_math_lib(struct VM *vm){
   /* constants */
   tbl_set_public(t.as.t, V_str_from_c("pi"),          V_num(M_PI));
   tbl_set_public(t.as.t, V_str_from_c("huge"),        V_num(HUGE_VAL));
+  tbl_set_public(t.as.t, V_str_from_c("infinity"),    V_num(INFINITY));
   tbl_set_public(t.as.t, V_str_from_c("maxinteger"),  V_int(LLONG_MAX));
   tbl_set_public(t.as.t, V_str_from_c("mininteger"),  V_int(LLONG_MIN));
 
