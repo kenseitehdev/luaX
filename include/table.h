@@ -1,6 +1,6 @@
 #ifndef TABLE_H
 #define TABLE_H
-
+#include <string.h>
 #include "interpreter.h"  /* for Env, VM, Value */
 
 

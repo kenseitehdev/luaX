@@ -12,6 +12,22 @@ void tbl_foreach_public(struct Table *t, TableIterCallback callback, void *userd
     }
 }
 
+Value V_table(void){ return (Value){.tag=VAL_TABLE,.as.t=tbl_new()}; }
+int value_equal(Value a, Value b){
+  if(a.tag!=b.tag){
+    if((a.tag==VAL_INT&&b.tag==VAL_NUM)) return (double)a.as.i==b.as.n;
+    if((a.tag==VAL_NUM&&b.tag==VAL_INT)) return a.as.n==(double)b.as.i;
+    return 0;
+  }
+  switch(a.tag){
+    case VAL_NIL: return 1;
+    case VAL_BOOL: return a.as.b==b.as.b;
+    case VAL_INT: return a.as.i==b.as.i;
+    case VAL_NUM: return a.as.n==b.as.n;
+    case VAL_STR: return a.as.s->len==b.as.s->len && memcmp(a.as.s->data,b.as.s->data,a.as.s->len)==0;
+    default: return a.as.t==b.as.t;
+  }
+}
 void tbl_set(Table *t, Value key, Value val){
   unsigned long long h=hash_value(key);
   int idx = (int)(h % t->cap);

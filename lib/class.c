@@ -34,13 +34,6 @@ static int get_index(Value table, int idx, Value *out) {
     if (table.tag != VAL_TABLE) return 0;
     return tbl_get_public(table.as.t, V_int(idx), out);
 }
-
-/* Check if value is callable */
-static int is_callable(Value v) {
-    return v.tag == VAL_FUNC || v.tag == VAL_CFUNC;
-}
-
-/* Look up a method in class hierarchy */
 static int lookup_method(Value class_table, const char *method_name, Value *out) {
     Value current = class_table;
     

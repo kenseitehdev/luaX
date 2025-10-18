@@ -247,7 +247,7 @@ void register_date_lib(struct VM *vm);
 void register_request_lib(struct VM *vm);
 void register_package_lib(VM *vm);
 void register_exception_lib(VM *vm);
-
+void register_libs();
 int as_truthy(Value v);
 /* public adapters for libraries implemented in other files */
 void  tbl_set_public(struct Table *t, Value key, Value val);

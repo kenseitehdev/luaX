@@ -26,4 +26,5 @@ Value builtin_tonumber(struct VM *vm, int argc, Value *argv);
 Value builtin_package(struct VM *vm, int argc, Value *argv);
 Value builtin_package(struct VM *vm, int argc, Value *argv); 
 extern Value vm_load_and_run_file(VM *vm, const char *path, const char *modname);
+extern int value_equal(Value a, Value b);
 #endif

@@ -20,9 +20,6 @@ static char *sdup(const char *s) {
   return p;
 }
 
-static int is_callable(Value v) {
-  return v.tag == VAL_CFUNC || v.tag == VAL_FUNC;
-}
 
 /* does t[i] exist and is non-nil? (1-indexed) */
 static int index_present(Table *t, int i) {

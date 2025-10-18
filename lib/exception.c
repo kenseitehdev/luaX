@@ -46,13 +46,6 @@ static Value exception_error(const char *msg) {
     fprintf(stderr, "exception: %s\n", msg);
     return V_nil();
 }
-
-/* Check if value is callable */
-static int is_callable(Value v) {
-    return v.tag == VAL_FUNC || v.tag == VAL_CFUNC;
-}
-
-/* ---- Protected call helper ---- */
 static int protected_call(struct VM *vm, Value func, int argc, Value *argv, Value *ret) {
     if (!is_callable(func)) {
         *ret = V_nil();

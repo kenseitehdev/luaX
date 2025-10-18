@@ -32,22 +32,6 @@ unsigned long long hash_value(Value v){
     default: return 0x12345678ULL;
   }
 }
-Value V_table(void){ return (Value){.tag=VAL_TABLE,.as.t=tbl_new()}; }
-int value_equal(Value a, Value b){
-  if(a.tag!=b.tag){
-    if((a.tag==VAL_INT&&b.tag==VAL_NUM)) return (double)a.as.i==b.as.n;
-    if((a.tag==VAL_NUM&&b.tag==VAL_INT)) return a.as.n==(double)b.as.i;
-    return 0;
-  }
-  switch(a.tag){
-    case VAL_NIL: return 1;
-    case VAL_BOOL: return a.as.b==b.as.b;
-    case VAL_INT: return a.as.i==b.as.i;
-    case VAL_NUM: return a.as.n==b.as.n;
-    case VAL_STR: return a.as.s->len==b.as.s->len && memcmp(a.as.s->data,b.as.s->data,a.as.s->len)==0;
-    default: return a.as.t==b.as.t;
-  }
-}
 static void print_value(Value v){
   switch(v.tag){
     case VAL_NIL:   printf("nil"); break;
@@ -192,69 +176,6 @@ int to_int_val(Value v, int dflt){
   if (v.tag == VAL_INT) return (int)v.as.i;
   if (v.tag == VAL_NUM) return (int)v.as.n;
   return dflt;
-}
-Value builtin__G(struct VM *vm, int argc, Value *argv){
-  (void)argc;(void)argv;
-  Env *root = env_root(vm->env);
-  Value t = V_table();
-  for (int i=0;i<root->count;i++){
-    tbl_set(t.as.t, V_str_from_c(root->names[i]), root->vals[i]);
-  }
-  return t;
-}
-Value builtin_rawequal(struct VM *vm, int argc, Value *argv){
-  (void)vm;
-  if (argc<2) return V_bool(0);
-  return V_bool(value_equal(argv[0], argv[1]));
-}
-Value builtin_rawget(struct VM *vm, int argc, Value *argv){
-  (void)vm;
-  if (argc<2 || argv[0].tag!=VAL_TABLE) return V_nil();
-  Value out;
-  if (tbl_get(argv[0].as.t, argv[1], &out)) return out;
-  return V_nil();
-}
-Value builtin_rawset(struct VM *vm, int argc, Value *argv){
-  (void)vm;
-  if (argc<3 || argv[0].tag!=VAL_TABLE) return V_nil();
-  tbl_set(argv[0].as.t, argv[1], argv[2]);
-  return argv[0];
-}
-Value builtin_next(struct VM *vm, int argc, Value *argv){
-  (void)vm;
-  if (argc<1 || argv[0].tag!=VAL_TABLE) return V_nil();
-  Table *t = argv[0].as.t;
-  int has_key = (argc>=2) && (argv[1].tag!=VAL_NIL);
-  int found = !has_key;
-  for (int bi=0; bi<t->cap; ++bi){
-    for (TableEntry *e = t->buckets[bi]; e; e=e->next){
-      if (!found){
-        if (value_equal(e->key, argv[1])) { found = 1; }
-        continue;
-      } else {
-        Value tup = V_table();
-        tbl_set(tup.as.t, V_int(1), e->key);
-        tbl_set(tup.as.t, V_int(2), e->val);
-        return tup;
-      }
-    }
-  }
-  return V_nil();
-}
-Value builtin_pairs(struct VM *vm, int argc, Value *argv){
-  (void)vm;
-  if (argc < 1 || argv[0].tag != VAL_TABLE) return V_nil();
-  Value mm = mm_of(argv[0], "__pairs");
-  if (mm.tag != VAL_NIL) {
-    Value res = call_any(vm, mm, 1, &argv[0]);
-    if (res.tag == VAL_TABLE) return res;
-  }
-  Value triple = V_table();
-  Value iter; iter.tag = VAL_CFUNC; iter.as.cfunc = builtin_next;
-  tbl_set(triple.as.t, V_int(1), iter);
-  tbl_set(triple.as.t, V_int(2), argv[0]);
-  tbl_set(triple.as.t, V_int(3), V_nil());
-  return triple;
 }
 Value ipairs_iter(struct VM *vm, int argc, Value *argv){
   (void)vm;
@@ -1617,20 +1538,7 @@ if (lua_cpath_env && *lua_cpath_env) {
     env_add(vm.env, "package",  package, false);
     env_add(vm.env, "Packages", package, false);
   }
-  register_package_lib(&vm);
-  register_coroutine_lib(&vm);
-  register_math_lib(&vm);
-  register_string_lib(&vm);
-  register_table_lib(&vm);
-  register_utf8_lib(&vm);
-  register_os_lib(&vm);
-  register_io_lib(&vm);
-  register_debug_lib(&vm);
-  register_random_lib(&vm);
-  register_date_lib(&vm);
-  register_exception_lib(&vm);
-  register_async_lib(&vm);
-  register_class_lib(&vm);
+  register_libs(&vm);
   exec_stmt(&vm, root);
   return 0;
 }

@@ -1,5 +1,4 @@
 #include "../include/builtins.h"
-
 Value builtin_select(struct VM *vm, int argc, Value *argv){
   (void)vm;
   if (argc < 1) return V_nil();
@@ -14,6 +13,71 @@ Value builtin_select(struct VM *vm, int argc, Value *argv){
   if (i < 1 || i > argc - 1) return V_nil();
   return argv[i];
 }
+
+Value builtin__G(struct VM *vm, int argc, Value *argv){
+  (void)argc;(void)argv;
+  Env *root = env_root(vm->env);
+  Value t = V_table();
+  for (int i=0;i<root->count;i++){
+    tbl_set(t.as.t, V_str_from_c(root->names[i]), root->vals[i]);
+  }
+  return t;
+}
+Value builtin_rawequal(struct VM *vm, int argc, Value *argv){
+  (void)vm;
+  if (argc<2) return V_bool(0);
+  return V_bool(value_equal(argv[0], argv[1]));
+}
+Value builtin_rawget(struct VM *vm, int argc, Value *argv){
+  (void)vm;
+  if (argc<2 || argv[0].tag!=VAL_TABLE) return V_nil();
+  Value out;
+  if (tbl_get(argv[0].as.t, argv[1], &out)) return out;
+  return V_nil();
+}
+Value builtin_rawset(struct VM *vm, int argc, Value *argv){
+  (void)vm;
+  if (argc<3 || argv[0].tag!=VAL_TABLE) return V_nil();
+  tbl_set(argv[0].as.t, argv[1], argv[2]);
+  return argv[0];
+}
+Value builtin_next(struct VM *vm, int argc, Value *argv){
+  (void)vm;
+  if (argc<1 || argv[0].tag!=VAL_TABLE) return V_nil();
+  Table *t = argv[0].as.t;
+  int has_key = (argc>=2) && (argv[1].tag!=VAL_NIL);
+  int found = !has_key;
+  for (int bi=0; bi<t->cap; ++bi){
+    for (TableEntry *e = t->buckets[bi]; e; e=e->next){
+      if (!found){
+        if (value_equal(e->key, argv[1])) { found = 1; }
+        continue;
+      } else {
+        Value tup = V_table();
+        tbl_set(tup.as.t, V_int(1), e->key);
+        tbl_set(tup.as.t, V_int(2), e->val);
+        return tup;
+      }
+    }
+  }
+  return V_nil();
+}
+Value builtin_pairs(struct VM *vm, int argc, Value *argv){
+  (void)vm;
+  if (argc < 1 || argv[0].tag != VAL_TABLE) return V_nil();
+  Value mm = mm_of(argv[0], "__pairs");
+  if (mm.tag != VAL_NIL) {
+    Value res = call_any(vm, mm, 1, &argv[0]);
+    if (res.tag == VAL_TABLE) return res;
+  }
+  Value triple = V_table();
+  Value iter; iter.tag = VAL_CFUNC; iter.as.cfunc = builtin_next;
+  tbl_set(triple.as.t, V_int(1), iter);
+  tbl_set(triple.as.t, V_int(2), argv[0]);
+  tbl_set(triple.as.t, V_int(3), V_nil());
+  return triple;
+}
+
 /* getmetatable with protection: return mt.__metatable if present */
 Value builtin_getmetatable(struct VM *vm, int argc, Value *argv){
   (void)vm;
