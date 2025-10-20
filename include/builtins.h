@@ -2,6 +2,9 @@
 #ifndef BUILTINS_H
 #define BUILTINS_H
 #include <string.h>
+#include <setjmp.h>
+#include "vm.h"
+#include "err.h"
 #include "interpreter.h"
 
 // in builtins.h (or a common header)
@@ -18,7 +21,14 @@ Value builtin__G(struct VM *vm, int argc, Value *argv);
 Value builtin_rawequal(struct VM *vm, int argc, Value *argv);
 Value builtin_rawget(struct VM *vm, int argc, Value *argv);
 Value builtin_rawset(struct VM *vm, int argc, Value *argv);
-Value builtin_next(struct VM *vm, int argc, Value *argv);
+Value builtin_loadfile(VM *vm, int argc, Value *argv);
+Value builtin_require(VM *vm, int argc, Value *argv);
+Value builtin_next(VM *vm, int argc, Value *argv);
+Value builtin_tonumber(VM *vm, int argc, Value *argv);
+Value builtin_tostring(VM *vm, int argc, Value *argv);
+Value builtin_type(VM *vm, int argc, Value *argv);
+Value builtin_xpcall(VM *vm, int argc, Value *argv);
+Value builtin_pcall(VM *vm, int argc, Value *argv);
 Value builtin_pairs(struct VM *vm, int argc, Value *argv);
 Value ipairs_iter(struct VM *vm, int argc, Value *argv); /* iterator used by ipairs */
 Value builtin_ipairs(struct VM *vm, int argc, Value *argv);

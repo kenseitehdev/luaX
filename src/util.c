@@ -24,6 +24,33 @@ FILE* open_string_as_FILE(const char *code) {
     rewind(f);
     return f;
 }
+void print_value(Value v){
+  switch(v.tag){
+    case VAL_NIL:   printf("nil"); break;
+    case VAL_BOOL:  printf(v.as.b?"true":"false"); break;
+    case VAL_INT:   printf("%lld", v.as.i); break;
+    case VAL_NUM:   printf("%g", v.as.n); break;
+    case VAL_STR:   fwrite(v.as.s->data,1,v.as.s->len,stdout); break;
+    case VAL_TABLE: printf("table:%p", (void*)v.as.t); break;
+    case VAL_CFUNC: printf("function:%p", (void*)v.as.cfunc); break;
+    case VAL_FUNC:  printf("function:%p",  (void*)v.as.fn); break;
+  }
+}
+Str *to_string_buf(Value v){
+  char tmp[64];
+  switch(v.tag){
+    case VAL_NIL:   return Str_new_len("nil", 3);
+    case VAL_BOOL:  return v.as.b? Str_new_len("true",4):Str_new_len("false",5);
+    case VAL_INT:   snprintf(tmp,sizeof(tmp),"%lld", v.as.i); return Str_new_len(tmp,(int)strlen(tmp));
+    case VAL_NUM:   snprintf(tmp,sizeof(tmp),"%.17g", v.as.n); return Str_new_len(tmp,(int)strlen(tmp));
+    case VAL_STR:   return Str_new_len(v.as.s->data, v.as.s->len);
+    case VAL_TABLE: snprintf(tmp,sizeof(tmp),"table:%p",(void*)v.as.t); return Str_new_len(tmp,(int)strlen(tmp));
+    case VAL_CFUNC: snprintf(tmp,sizeof(tmp),"function:%p",(void*)v.as.cfunc); return Str_new_len(tmp,(int)strlen(tmp));
+    case VAL_FUNC:  snprintf(tmp,sizeof(tmp),"function:%p",(void*)v.as.fn); return Str_new_len(tmp,(int)strlen(tmp));
+  }
+  return Str_new_len("<unknown>",9);
+}
+
 Value V_nil(void){ Value v={.tag=VAL_NIL}; return v; }
 Value V_bool(bool b){ Value v={.tag=VAL_BOOL}; v.as.b=b?1:0; return v; }
 Value V_int(long long x){ Value v={.tag=VAL_INT}; v.as.i=x; return v; }

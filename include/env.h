@@ -2,8 +2,8 @@
 #define ENV_H
 
 #include <stdbool.h>
-#include "interpreter.h"  /* for Env, VM, Value */
-
+#include "interpreter.h"  /* for Env, VM, Value */bin/ 
+#include "builtins.h"
 extern Env *VM_env;  /* pointer to current lexical environment */
 
 /* Environment management functions */

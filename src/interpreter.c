@@ -32,32 +32,6 @@ unsigned long long hash_value(Value v){
     default: return 0x12345678ULL;
   }
 }
-static void print_value(Value v){
-  switch(v.tag){
-    case VAL_NIL:   printf("nil"); break;
-    case VAL_BOOL:  printf(v.as.b?"true":"false"); break;
-    case VAL_INT:   printf("%lld", v.as.i); break;
-    case VAL_NUM:   printf("%g", v.as.n); break;
-    case VAL_STR:   fwrite(v.as.s->data,1,v.as.s->len,stdout); break;
-    case VAL_TABLE: printf("table:%p", (void*)v.as.t); break;
-    case VAL_CFUNC: printf("function:%p", (void*)v.as.cfunc); break;
-    case VAL_FUNC:  printf("function:%p",  (void*)v.as.fn); break;
-  }
-}
-static Str *to_string_buf(Value v){
-  char tmp[64];
-  switch(v.tag){
-    case VAL_NIL:   return Str_new_len("nil", 3);
-    case VAL_BOOL:  return v.as.b? Str_new_len("true",4):Str_new_len("false",5);
-    case VAL_INT:   snprintf(tmp,sizeof(tmp),"%lld", v.as.i); return Str_new_len(tmp,(int)strlen(tmp));
-    case VAL_NUM:   snprintf(tmp,sizeof(tmp),"%.17g", v.as.n); return Str_new_len(tmp,(int)strlen(tmp));
-    case VAL_STR:   return Str_new_len(v.as.s->data, v.as.s->len);
-    case VAL_TABLE: snprintf(tmp,sizeof(tmp),"table:%p",(void*)v.as.t); return Str_new_len(tmp,(int)strlen(tmp));
-    case VAL_CFUNC: snprintf(tmp,sizeof(tmp),"function:%p",(void*)v.as.cfunc); return Str_new_len(tmp,(int)strlen(tmp));
-    case VAL_FUNC:  snprintf(tmp,sizeof(tmp),"function:%p",(void*)v.as.fn); return Str_new_len(tmp,(int)strlen(tmp));
-  }
-  return Str_new_len("<unknown>",9);
-}
 int is_callable(Value v){
   return (v.tag == VAL_CFUNC) || (v.tag == VAL_FUNC);
 }
@@ -114,7 +88,6 @@ static int try_un_mm(struct VM *vm, const char *mm, Value a, Value *out){
 Value call_any(VM *vm, Value cal, int argc, Value *argv) {
     if (cal.tag == VAL_CFUNC) return cal.as.cfunc(vm, argc, argv);
     if (cal.tag == VAL_FUNC)  return call_function(vm, cal.as.fn, argc, argv);
-
     Value f = mm_of(cal, "__call");
     if (f.tag != VAL_NIL) {
         Value *args = NULL;
@@ -126,7 +99,6 @@ Value call_any(VM *vm, Value cal, int argc, Value *argv) {
         if (args) free(args);
         return r;
     }
-
     const char *type_name = "unknown";
     switch(cal.tag) {
         case VAL_NIL:   type_name = "nil"; break;
@@ -140,11 +112,9 @@ Value call_any(VM *vm, Value cal, int argc, Value *argv) {
         case VAL_FUNC:  type_name = "function"; break;
         case VAL_MULTI: type_name = "multi"; break;
     }
-
     char err_msg[512];
     snprintf(err_msg, sizeof(err_msg),
              "attempted to call a non-function: called a %s value", type_name);
-
     if (vm->err_frame) {
         ErrFrame *frame = (ErrFrame*)vm->err_frame;
         int depth = 0;
@@ -157,7 +127,6 @@ Value call_any(VM *vm, Value cal, int argc, Value *argv) {
             depth++;
         }
     }
-
     vm_raise(vm, V_str_from_c(err_msg));
     return V_nil();
 }
@@ -304,7 +273,7 @@ static Value builtin__VERSION(struct VM *vm, int argc, Value *argv){
   (void)vm;(void)argc;(void)argv;
   return V_str_from_c("LuaX 1.0.2");
 }
-static char* read_entire_file(const char *path, size_t *out_len){
+char* read_entire_file(const char *path, size_t *out_len){
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
@@ -319,7 +288,7 @@ static char* read_entire_file(const char *path, size_t *out_len){
     if (out_len) *out_len = rd;
     return buf;
 }
-static AST* compile_chunk_from_FILE(FILE *fp){
+AST* compile_chunk_from_FILE(FILE *fp){
   Token *toks = NULL; int count = 0, cap = 0;
   for (;;) {
     Token t = next(fp);
@@ -340,94 +309,6 @@ static AST* compile_chunk_from_FILE(FILE *fp){
   free(toks);
   parser_destroy(p);
   return program;
-}
-Value builtin_load(struct VM *vm, int argc, Value *argv){
-  if (argc<1 || argv[0].tag!=VAL_STR) return V_nil();
-  FILE *fp = open_string_as_FILE(argv[0].as.s->data);
-  if (!fp) return V_nil();
-  AST *program = compile_chunk_from_FILE(fp);
-  fclose(fp);
-  Func *fn = xmalloc(sizeof(*fn)); memset(fn,0,sizeof(*fn));
-  fn->params=(ASTVec){0}; fn->vararg=false; fn->body=program; fn->env=vm->env;
-  Value v; v.tag=VAL_FUNC; v.as.fn=fn; return v;
-}
-Value builtin_loadfile(struct VM *vm, int argc, Value *argv){
-  if (argc<1 || argv[0].tag!=VAL_STR) return V_nil();
-  size_t n=0; char *src = read_entire_file(argv[0].as.s->data, &n);
-  if (!src) { fprintf(stderr,"[LuaX]: loadfile: cannot open '%s'\n", argv[0].as.s->data); return V_nil(); }
-  FILE *fp = open_string_as_FILE(src);
-  free(src);
-  if (!fp) return V_nil();
-  AST *program = compile_chunk_from_FILE(fp);
-  fclose(fp);
-  Func *fn = xmalloc(sizeof(*fn)); memset(fn,0,sizeof(*fn));
-  fn->params=(ASTVec){0}; fn->vararg=false; fn->body=program; fn->env=vm->env;
-  Value v; v.tag=VAL_FUNC; v.as.fn=fn; return v;
-}
-Value builtin_pcall(struct VM *vm, int argc, Value *argv){
-  if (argc < 1 || !is_callable(argv[0])) {
-    Value tup = V_table();
-    tbl_set(tup.as.t, V_int(1), V_bool(0));
-    tbl_set(tup.as.t, V_int(2), V_str_from_c("attempt to call a non-function"));
-    return tup;
-  }
-  ErrFrame frame;
-  vm_err_push(vm, &frame);
-  if (setjmp(frame.jb) == 0) {
-    Value ret = call_any(vm, argv[0], argc - 1, argv + 1);
-    vm_err_pop(vm);
-    Value tup = V_table();
-    tbl_set(tup.as.t, V_int(1), V_bool(1));
-    tbl_set(tup.as.t, V_int(2), ret);
-    return tup;
-  } else {
-    Value err = vm->err_obj.tag ? vm->err_obj : V_str_from_c("error");
-    vm_err_pop(vm);
-    Value tup = V_table();
-    tbl_set(tup.as.t, V_int(1), V_bool(0));
-    tbl_set(tup.as.t, V_int(2), err);
-    return tup;
-  }
-}
-Value builtin_xpcall(struct VM *vm, int argc, Value *argv){
-  if (argc < 2 || !is_callable(argv[0]) || !is_callable(argv[1])) {
-    Value tup = V_table();
-    tbl_set(tup.as.t, V_int(1), V_bool(0));
-    tbl_set(tup.as.t, V_int(2), V_str_from_c("bad arguments to xpcall"));
-    return tup;
-  }
-  Value f = argv[0];
-  Value msgh = argv[1];
-  ErrFrame frame;
-  vm_err_push(vm, &frame);
-  if (setjmp(frame.jb) == 0) {
-    Value ret = call_any(vm, f, argc - 2, argv + 2);
-    vm_err_pop(vm);
-    Value tup = V_table();
-    tbl_set(tup.as.t, V_int(1), V_bool(1));
-    tbl_set(tup.as.t, V_int(2), ret);
-    return tup;
-  } else {
-    Value err_in = vm->err_obj.tag ? vm->err_obj : V_str_from_c("error");
-    vm_err_pop(vm);
-    ErrFrame mh;
-    vm_err_push(vm, &mh);
-    if (setjmp(mh.jb) == 0) {
-      Value msgret = call_any(vm, msgh, 1, &err_in);
-      vm_err_pop(vm);
-      Value tup = V_table();
-      tbl_set(tup.as.t, V_int(1), V_bool(0));
-      tbl_set(tup.as.t, V_int(2), msgret);
-      return tup;
-    } else {
-      Value handler_err = vm->err_obj.tag ? vm->err_obj : V_str_from_c("error in error handler");
-      vm_err_pop(vm);
-      Value tup = V_table();
-      tbl_set(tup.as.t, V_int(1), V_bool(0));
-      tbl_set(tup.as.t, V_int(2), handler_err);
-      return tup;
-    }
-  }
 }
 static Value eval_expr(VM *vm, AST *n);
 static void  exec_stmt(VM *vm, AST *n);
@@ -590,16 +471,13 @@ static Value eval_expr(VM *vm, AST *n){
 case OP_IDIV: {
     Value right = vm_pop(vm);   
     Value left  = vm_pop(vm);
-
     double l = (left.tag == VAL_INT) ? (double)left.as.i :
                (left.tag == VAL_NUM) ? left.as.n : 0.0;
     double r = (right.tag == VAL_INT) ? (double)right.as.i :
                (right.tag == VAL_NUM) ? right.as.n : 0.0;
-
     if (r == 0.0) {
         vm_raise(vm, V_str_from_c("integer division by zero"));
     }
-
     long long res = (long long)floor(l / r);
     vm_push(vm,V_int(res));  
     break;
@@ -1207,16 +1085,13 @@ case AST_GOTO: {
       }
       case AST_BREAK:
         vm->break_flag=true; pc++; break;
-
 case AST_RETURN: {
   Value rv = V_nil();
   if(st->as.ret.values.count == 0){
     rv = V_nil();
   } else if(st->as.ret.values.count == 1){
-
     rv = eval_expr(vm, st->as.ret.values.items[0]);
   } else {
-
     rv = V_table();
     for(size_t i = 0; i < st->as.ret.values.count; i++){
       Value v = eval_expr(vm, st->as.ret.values.items[i]);
@@ -1230,38 +1105,29 @@ case AST_RETURN: {
   if(labels) free(labels);
   return;
 }
-
 case AST_ASSIGN_LIST: {
     size_t rn = st->as.massign.rvals.count;
     Value *rv = rn? xmalloc(sizeof(Value)*rn):NULL;
-
     bool *is_call = rn? xmalloc(sizeof(bool)*rn):NULL;
-
     for(size_t i=0;i<rn;i++) {
         AST *rhs = st->as.massign.rvals.items[i];
         is_call[i] = (rhs && rhs->kind == AST_CALL);
         rv[i]=eval_expr(vm, rhs);
     }
-
     Value *all_vals = rv;
     size_t total_vals = rn;
     bool expanded = false;
-
     if(rn > 0 && st->as.massign.lvals.count > rn && is_call[rn-1]){
         Value last = rv[rn-1];
-
         if(last.tag == VAL_TABLE){
             Value test;
             if(tbl_get(last.as.t, V_int(1), &test) && test.tag != VAL_NIL){
-
                 size_t needed = st->as.massign.lvals.count;
                 all_vals = xmalloc(sizeof(Value) * needed);
                 expanded = true;
-
                 for(size_t i=0; i<rn-1; i++){
                     all_vals[i] = rv[i];
                 }
-
                 size_t idx = rn-1;
                 for(long long j=1; idx < needed; j++){
                     Value v;
@@ -1278,7 +1144,6 @@ case AST_ASSIGN_LIST: {
     for(size_t i=0;i<st->as.massign.lvals.count;i++){
         AST *lhs = st->as.massign.lvals.items[i];
         Value val = (i<total_vals)?all_vals[i]:V_nil();
-
         if(lhs->kind==AST_IDENT){
             Env *owner=NULL; int slot=-1;
             if(env_find(vm->env, lhs->as.ident.name, &owner, &slot)){
@@ -1303,7 +1168,6 @@ case AST_ASSIGN_LIST: {
     break;
 }
 case AST_VAR: {
-
   Value init = st->as.var.init? eval_expr(vm, st->as.var.init): V_nil();
   env_add(vm->env, st->as.var.name, init, st->as.var.is_local);
   if (st->as.var.is_close) {
@@ -1373,7 +1237,6 @@ static const char *default_package_path(void){
   const char *env   = getenv("LUA_PATH");
   if (env54 && *env54) return env54;
   if (env   && *env)   return env;
-
   return "?.lua;?/init.lua;"                    
          "./?.lua;./?/init.lua;"                 
          "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua;"
@@ -1479,30 +1342,7 @@ int interpret(AST *root){
   vm.active_co     = NULL;
   vm.err_frame = NULL;
   vm.err_obj   = V_nil();
-
-  env_add(vm.env, "print",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_print},   false);
-  env_add(vm.env, "select",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_select},  false);
-  env_add(vm.env, "pairs",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pairs},   false);
-  env_add(vm.env, "ipairs",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_ipairs},  false);
-  env_add(vm.env, "assert",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_assert},         false);
-  env_add(vm.env, "collectgarbage", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_collectgarbage}, false);
-  env_add(vm.env, "error",          (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_error},          false);
-  env_add(vm.env, "_G",             (Value){.tag=VAL_CFUNC,.as.cfunc=builtin__G},             false);
-  env_add(vm.env, "getmetatable",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_getmetatable},   false);
-  env_add(vm.env, "setmetatable",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_setmetatable},   false);
-  env_add(vm.env, "rawequal",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawequal},       false);
-  env_add(vm.env, "rawget",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawget},         false);
-  env_add(vm.env, "rawset",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawset},         false);
-  env_add(vm.env, "load",           (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_load},           false);
-  env_add(vm.env, "loadfile",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_loadfile},       false);
-  env_add(vm.env, "require",        (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_require},        false);
-  env_add(vm.env, "next",           (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_next},           false);
-  env_add(vm.env, "tonumber",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tonumber},       false);
-  env_add(vm.env, "tostring",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tostring},       false);
-  env_add(vm.env, "type",           (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_type},           false);
-  env_add(vm.env, "_VERSION",       V_str_from_c("LuaX 1.0.2"),                                 false);
-  env_add(vm.env, "xpcall",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_xpcall},         false);
-  env_add(vm.env, "pcall",          (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pcall},          false);
+  env_add_builtins(&vm);
   {
     Value package = V_table();
     Value loaded  = V_table();
@@ -1554,9 +1394,7 @@ Value vm_load_and_run_file(VM *vm, const char *path, const char *modname) {
     }
     FILE *fp = open_string_as_FILE(src);
     free(src);
-    if (!fp) {
-        return V_str_from_c("failed to create string FILE");
-    }
+    if (!fp) {return V_str_from_c("failed to create string FILE");}
     AST *program = compile_chunk_from_FILE(fp);
     fclose(fp);
     Func *fn = xmalloc(sizeof(*fn));

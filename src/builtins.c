@@ -1,4 +1,94 @@
 #include "../include/builtins.h"
+
+Value builtin_load(struct VM *vm, int argc, Value *argv){
+  if (argc<1 || argv[0].tag!=VAL_STR) return V_nil();
+  FILE *fp = open_string_as_FILE(argv[0].as.s->data);
+  if (!fp) return V_nil();
+  AST *program = compile_chunk_from_FILE(fp);
+  fclose(fp);
+  Func *fn = xmalloc(sizeof(*fn)); memset(fn,0,sizeof(*fn));
+  fn->params=(ASTVec){0}; fn->vararg=false; fn->body=program; fn->env=vm->env;
+  Value v; v.tag=VAL_FUNC; v.as.fn=fn; return v;
+}
+Value builtin_loadfile(struct VM *vm, int argc, Value *argv){
+  if (argc<1 || argv[0].tag!=VAL_STR) return V_nil();
+  size_t n=0; char *src = read_entire_file(argv[0].as.s->data, &n);
+  if (!src) { fprintf(stderr,"[LuaX]: loadfile: cannot open '%s'\n", argv[0].as.s->data); return V_nil(); }
+  FILE *fp = open_string_as_FILE(src);
+  free(src);
+  if (!fp) return V_nil();
+  AST *program = compile_chunk_from_FILE(fp);
+  fclose(fp);
+  Func *fn = xmalloc(sizeof(*fn)); memset(fn,0,sizeof(*fn));
+  fn->params=(ASTVec){0}; fn->vararg=false; fn->body=program; fn->env=vm->env;
+  Value v; v.tag=VAL_FUNC; v.as.fn=fn; return v;
+}
+Value builtin_pcall(struct VM *vm, int argc, Value *argv){
+  if (argc < 1 || !is_callable(argv[0])) {
+    Value tup = V_table();
+    tbl_set(tup.as.t, V_int(1), V_bool(0));
+    tbl_set(tup.as.t, V_int(2), V_str_from_c("attempt to call a non-function"));
+    return tup;
+  }
+  ErrFrame frame;
+  vm_err_push(vm, &frame);
+  if (setjmp(frame.jb) == 0) {
+    Value ret = call_any(vm, argv[0], argc - 1, argv + 1);
+    vm_err_pop(vm);
+    Value tup = V_table();
+    tbl_set(tup.as.t, V_int(1), V_bool(1));
+    tbl_set(tup.as.t, V_int(2), ret);
+    return tup;
+  } else {
+    Value err = vm->err_obj.tag ? vm->err_obj : V_str_from_c("error");
+    vm_err_pop(vm);
+    Value tup = V_table();
+    tbl_set(tup.as.t, V_int(1), V_bool(0));
+    tbl_set(tup.as.t, V_int(2), err);
+    return tup;
+  }
+}
+Value builtin_xpcall(struct VM *vm, int argc, Value *argv){
+  if (argc < 2 || !is_callable(argv[0]) || !is_callable(argv[1])) {
+    Value tup = V_table();
+    tbl_set(tup.as.t, V_int(1), V_bool(0));
+    tbl_set(tup.as.t, V_int(2), V_str_from_c("bad arguments to xpcall"));
+    return tup;
+  }
+  Value f = argv[0];
+  Value msgh = argv[1];
+  ErrFrame frame;
+  vm_err_push(vm, &frame);
+  if (setjmp(frame.jb) == 0) {
+    Value ret = call_any(vm, f, argc - 2, argv + 2);
+    vm_err_pop(vm);
+    Value tup = V_table();
+    tbl_set(tup.as.t, V_int(1), V_bool(1));
+    tbl_set(tup.as.t, V_int(2), ret);
+    return tup;
+  } else {
+    Value err_in = vm->err_obj.tag ? vm->err_obj : V_str_from_c("error");
+    vm_err_pop(vm);
+    ErrFrame mh;
+    vm_err_push(vm, &mh);
+    if (setjmp(mh.jb) == 0) {
+      Value msgret = call_any(vm, msgh, 1, &err_in);
+      vm_err_pop(vm);
+      Value tup = V_table();
+      tbl_set(tup.as.t, V_int(1), V_bool(0));
+      tbl_set(tup.as.t, V_int(2), msgret);
+      return tup;
+    } else {
+      Value handler_err = vm->err_obj.tag ? vm->err_obj : V_str_from_c("error in error handler");
+      vm_err_pop(vm);
+      Value tup = V_table();
+      tbl_set(tup.as.t, V_int(1), V_bool(0));
+      tbl_set(tup.as.t, V_int(2), handler_err);
+      return tup;
+    }
+  }
+}
+
 Value builtin_select(struct VM *vm, int argc, Value *argv){
   (void)vm;
   if (argc < 1) return V_nil();
