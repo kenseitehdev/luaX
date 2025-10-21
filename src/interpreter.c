@@ -162,54 +162,7 @@ Value ipairs_iter(struct VM *vm, int argc, Value *argv){
   }
   return V_nil();
 }
-Value builtin_ipairs(struct VM *vm, int argc, Value *argv){
-  (void)argc;
-  if (argc < 1 || argv[0].tag != VAL_TABLE) return V_nil();
-  Value triple = V_table();
-  Value iter; iter.tag = VAL_CFUNC; iter.as.cfunc = ipairs_iter;
-  tbl_set(triple.as.t, V_int(1), iter);
-  tbl_set(triple.as.t, V_int(2), argv[0]);
-  tbl_set(triple.as.t, V_int(3), V_int(0));
-  return triple;
-}
-Value builtin_tonumber(struct VM* vm, int argc, Value* argv) {
-  (void)vm;
-  if (argc < 1) return V_nil();
-  if (argv[0].tag == VAL_INT || argv[0].tag == VAL_NUM) return argv[0];
-  if (argv[0].tag != VAL_STR) return V_nil();
-  const char* s = argv[0].as.s->data;
-  int len = argv[0].as.s->len;
-  while (*s && isspace((unsigned char)*s)) { s++; len--; }
-  while (len > 0 && isspace((unsigned char)s[len-1])) { len--; }
-  if (len <= 0) return V_nil();
-  if (argc >= 2 && argv[1].tag == VAL_INT) {
-    int base = (int)argv[1].as.i;
-    if (base < 2 || base > 36) return V_nil();
-    int sign = 1, i = 0, saw_digit = 0;
-    if (len > 0 && (s[0] == '+' || s[0] == '-')) { sign = (s[0] == '-') ? -1 : 1; s++; len--; }
-    long long value = 0;
-    for (i = 0; i < len; i++) {
-      unsigned char c = (unsigned char)s[i];
-      int d;
-      if (c >= '0' && c <= '9') d = c - '0';
-      else if (c >= 'A' && c <= 'Z') d = 10 + (c - 'A');
-      else if (c >= 'a' && c <= 'z') d = 10 + (c - 'a');
-      else return V_nil();
-      if (d >= base) return V_nil();
-      saw_digit = 1;
-      value = value * base + d;
-    }
-    if (!saw_digit) return V_nil();
-    if (sign < 0) value = -value;
-    return V_int(value);
-  } else {
-    char *end = NULL;
-    double d = strtod(s, &end);
-    if (!end || end != s + len) return V_nil();
-    return V_num(d);
-  }
-}
-static Value tostring_default(Value v) {
+ Value tostring_default(Value v) {
   char buf[64];
   switch (v.tag) {
     case VAL_NIL:
