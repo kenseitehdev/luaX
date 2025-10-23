@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "../include/interpreter.h"
+#include "regex.h"
 
 /* Maximum number of captures */
 #define LUA_MAXCAPTURES 32
@@ -1173,7 +1174,358 @@ static Value str_format(struct VM *vm, int argc, Value *argv) {
 static Value str_length(struct VM *vm, int argc, Value *argv) {
   return str_len(vm, argc, argv);  /* Just call str_len */
 }
+static regex_t* compile_regex_cached(const char *pattern, int cflags) {
+    regex_t *preg = (regex_t*)malloc(sizeof(regex_t));
+    if (!preg) { fprintf(stderr,"OOM\n"); exit(1); }
+    
+    int ret = regcomp(preg, pattern, cflags | REG_EXTENDED);
+    if (ret != 0) {
+        char errbuf[256];
+        regerror(ret, preg, errbuf, sizeof(errbuf));
+        fprintf(stderr, "Regex compilation error: %s\n", errbuf);
+        free(preg);
+        return NULL;
+    }
+    return preg;
+}
 
+/* string.refind(s, pattern [, init [, flags]]) -> {start, end, captures...} or nil */
+static Value str_refind(struct VM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc < 2 || argv[0].tag != VAL_STR || argv[1].tag != VAL_STR) 
+        return V_nil();
+    
+    const char *s = argv[0].as.s->data;
+    size_t sl = (size_t)argv[0].as.s->len;
+    const char *pattern = argv[1].as.s->data;
+    
+    int init = 1;
+    if (argc >= 3) {
+        if (argv[2].tag == VAL_INT) init = (int)argv[2].as.i;
+        else if (argv[2].tag == VAL_NUM) init = (int)argv[2].as.n;
+    }
+    
+    /* Parse flags */
+    int cflags = 0;
+    if (argc >= 4 && argv[3].tag == VAL_STR) {
+        const char *flags = argv[3].as.s->data;
+        for (int i = 0; flags[i]; i++) {
+            switch (flags[i]) {
+                case 'i': cflags |= REG_ICASE; break;
+                case 'm': cflags |= REG_NEWLINE; break;
+                default: break;
+            }
+        }
+    }
+    
+    init = lua_index_adjust(init, (int)sl);
+    if (init < 1) init = 1;
+    if (init > (int)sl + 1) return V_nil();
+    
+    /* Compile regex */
+    regex_t *preg = compile_regex_cached(pattern, cflags);
+    if (!preg) return V_nil();
+    
+    /* Execute regex */
+    regmatch_t matches[LUA_MAXCAPTURES];
+    int ret = regexec(preg, s + init - 1, LUA_MAXCAPTURES, matches, 0);
+    
+    regfree(preg);
+    free(preg);
+    
+    if (ret == REG_NOMATCH) return V_nil();
+    if (ret != 0) return V_nil();
+    
+    /* Build result table {start, end, capture1, capture2, ...} */
+    Value t = V_table();
+    
+    if (matches[0].rm_so != -1) {
+        int start = (int)matches[0].rm_so + init;
+        int end = (int)matches[0].rm_eo + init - 1;
+        tbl_set_public(t.as.t, V_int(1), V_int(start));
+        tbl_set_public(t.as.t, V_int(2), V_int(end));
+        
+        /* Add captures starting at index 3 */
+        int idx = 3;
+        for (int i = 1; i < LUA_MAXCAPTURES && matches[i].rm_so != -1; i++) {
+            Value cap = V_str_copy_n(s + init - 1 + matches[i].rm_so,
+                                    (size_t)(matches[i].rm_eo - matches[i].rm_so));
+            tbl_set_public(t.as.t, V_int(idx++), cap);
+        }
+    }
+    
+    return t;
+}
+
+/* string.rematch(s, pattern [, init [, flags]]) -> match or {captures...} or nil */
+static Value str_rematch(struct VM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc < 2 || argv[0].tag != VAL_STR || argv[1].tag != VAL_STR) 
+        return V_nil();
+    
+    const char *s = argv[0].as.s->data;
+    size_t sl = (size_t)argv[0].as.s->len;
+    const char *pattern = argv[1].as.s->data;
+    
+    int init = 1;
+    if (argc >= 3) {
+        if (argv[2].tag == VAL_INT) init = (int)argv[2].as.i;
+        else if (argv[2].tag == VAL_NUM) init = (int)argv[2].as.n;
+    }
+    
+    /* Parse flags */
+    int cflags = 0;
+    if (argc >= 4 && argv[3].tag == VAL_STR) {
+        const char *flags = argv[3].as.s->data;
+        for (int i = 0; flags[i]; i++) {
+            switch (flags[i]) {
+                case 'i': cflags |= REG_ICASE; break;
+                case 'm': cflags |= REG_NEWLINE; break;
+                default: break;
+            }
+        }
+    }
+    
+    init = lua_index_adjust(init, (int)sl);
+    if (init < 1) init = 1;
+    if (init > (int)sl + 1) return V_nil();
+    
+    /* Compile regex */
+    regex_t *preg = compile_regex_cached(pattern, cflags);
+    if (!preg) return V_nil();
+    
+    /* Execute regex */
+    regmatch_t matches[LUA_MAXCAPTURES];
+    int ret = regexec(preg, s + init - 1, LUA_MAXCAPTURES, matches, 0);
+    
+    regfree(preg);
+    free(preg);
+    
+    if (ret == REG_NOMATCH) return V_nil();
+    if (ret != 0) return V_nil();
+    
+    /* Count captures */
+    int capture_count = 0;
+    for (int i = 1; i < LUA_MAXCAPTURES && matches[i].rm_so != -1; i++) {
+        capture_count++;
+    }
+    
+    /* If we have captures, return them */
+    if (capture_count > 0) {
+        if (capture_count == 1) {
+            /* Single capture: return as string */
+            return V_str_copy_n(s + init - 1 + matches[1].rm_so,
+                              (size_t)(matches[1].rm_eo - matches[1].rm_so));
+        } else {
+            /* Multiple captures: return as table */
+            Value t = V_table();
+            for (int i = 1; i <= capture_count; i++) {
+                Value cap = V_str_copy_n(s + init - 1 + matches[i].rm_so,
+                                        (size_t)(matches[i].rm_eo - matches[i].rm_so));
+                tbl_set_public(t.as.t, V_int(i), cap);
+            }
+            return t;
+        }
+    }
+    
+    /* No captures: return whole match */
+    if (matches[0].rm_so != -1) {
+        return V_str_copy_n(s + init - 1 + matches[0].rm_so,
+                          (size_t)(matches[0].rm_eo - matches[0].rm_so));
+    }
+    
+    return V_nil();
+}
+
+/* string.regsub(s, pattern, repl [, n [, flags]]) -> {string, count} */
+static Value str_regsub(struct VM *vm, int argc, Value *argv) {
+    if (argc < 3 || argv[0].tag != VAL_STR || argv[1].tag != VAL_STR) 
+        return V_nil();
+    
+    const char *src = argv[0].as.s->data;
+    size_t sl = (size_t)argv[0].as.s->len;
+    const char *pattern = argv[1].as.s->data;
+    Value repl = argv[2];
+    
+    int limit = -1;
+    if (argc >= 4) {
+        if (argv[3].tag == VAL_INT) limit = (int)argv[3].as.i;
+        else if (argv[3].tag == VAL_NUM) limit = (int)argv[3].as.n;
+    }
+    
+    /* Parse flags */
+    int cflags = 0;
+    if (argc >= 5 && argv[4].tag == VAL_STR) {
+        const char *flags = argv[4].as.s->data;
+        for (int i = 0; flags[i]; i++) {
+            switch (flags[i]) {
+                case 'i': cflags |= REG_ICASE; break;
+                case 'm': cflags |= REG_NEWLINE; break;
+                default: break;
+            }
+        }
+    }
+    
+    /* Compile regex */
+    regex_t *preg = compile_regex_cached(pattern, cflags);
+    if (!preg) return V_nil();
+    
+    /* Build result string */
+    char *out = NULL;
+    size_t olen = 0, ocap = 0;
+    
+    const char *pos = src;
+    int count = 0;
+    
+    while (pos < src + sl && (limit < 0 || count < limit)) {
+        regmatch_t matches[LUA_MAXCAPTURES];
+        int ret = regexec(preg, pos, LUA_MAXCAPTURES, matches, 0);
+        
+        if (ret == REG_NOMATCH) break;
+        if (ret != 0) break;
+        
+        /* Append text before match */
+        size_t before_len = (size_t)matches[0].rm_so;
+        if (before_len > 0) {
+            gb_reserve(&out, &ocap, olen + before_len + 1);
+            memcpy(out + olen, pos, before_len);
+            olen += before_len;
+            out[olen] = '\0';
+        }
+        
+        /* Append replacement */
+        if (repl.tag == VAL_STR) {
+            const char *rs = repl.as.s->data;
+            size_t rl = (size_t)repl.as.s->len;
+            
+            /* Handle $0, $1, $2, etc. in replacement */
+            for (size_t i = 0; i < rl; i++) {
+                if (rs[i] == '$' && i + 1 < rl && rs[i+1] >= '0' && rs[i+1] <= '9') {
+                    int cap_idx = rs[i+1] - '0';
+                    if (cap_idx < LUA_MAXCAPTURES && matches[cap_idx].rm_so != -1) {
+                        size_t cap_len = (size_t)(matches[cap_idx].rm_eo - matches[cap_idx].rm_so);
+                        gb_reserve(&out, &ocap, olen + cap_len + 1);
+                        memcpy(out + olen, pos + matches[cap_idx].rm_so, cap_len);
+                        olen += cap_len;
+                        out[olen] = '\0';
+                    }
+                    i++;  /* Skip digit */
+                } else {
+                    gb_reserve(&out, &ocap, olen + 2);
+                    out[olen++] = rs[i];
+                    out[olen] = '\0';
+                }
+            }
+        } else if (repl.tag == VAL_FUNC || repl.tag == VAL_CFUNC) {
+            /* Call function with match */
+            Value match_str = V_str_copy_n(pos + matches[0].rm_so, 
+                                          (size_t)(matches[0].rm_eo - matches[0].rm_so));
+            Value args[1] = { match_str };
+            Value result_val = call_any_public(vm, repl, 1, args);
+            
+            if (result_val.tag == VAL_STR) {
+                size_t repl_len = (size_t)result_val.as.s->len;
+                gb_reserve(&out, &ocap, olen + repl_len + 1);
+                memcpy(out + olen, result_val.as.s->data, repl_len);
+                olen += repl_len;
+                out[olen] = '\0';
+            }
+        } else if (repl.tag == VAL_TABLE) {
+            /* Use first capture or whole match as key */
+            Value key;
+            if (matches[1].rm_so != -1) {
+                key = V_str_copy_n(pos + matches[1].rm_so,
+                                  (size_t)(matches[1].rm_eo - matches[1].rm_so));
+            } else {
+                key = V_str_copy_n(pos + matches[0].rm_so,
+                                  (size_t)(matches[0].rm_eo - matches[0].rm_so));
+            }
+            
+            Value val;
+            if (tbl_get_public(repl.as.t, key, &val) && val.tag == VAL_STR) {
+                size_t repl_len = (size_t)val.as.s->len;
+                gb_reserve(&out, &ocap, olen + repl_len + 1);
+                memcpy(out + olen, val.as.s->data, repl_len);
+                olen += repl_len;
+                out[olen] = '\0';
+            }
+        }
+        
+        count++;
+        pos += matches[0].rm_eo;
+        
+        /* Handle empty matches */
+        if (matches[0].rm_eo == 0) {
+            if (pos < src + sl) {
+                gb_reserve(&out, &ocap, olen + 2);
+                out[olen++] = *pos++;
+                out[olen] = '\0';
+            } else {
+                break;
+            }
+        }
+    }
+    
+    /* Append remaining text */
+    size_t remaining = src + sl - pos;
+    if (remaining > 0) {
+        gb_reserve(&out, &ocap, olen + remaining + 1);
+        memcpy(out + olen, pos, remaining);
+        olen += remaining;
+        out[olen] = '\0';
+    }
+    
+    regfree(preg);
+    free(preg);
+    
+    /* Return {string, count} */
+    Value ret = V_table();
+    if (out) {
+        Value result_str = V_str_copy_n(out, olen);
+        free(out);
+        tbl_set_public(ret.as.t, V_int(1), result_str);
+    } else {
+        tbl_set_public(ret.as.t, V_int(1), argv[0]);
+    }
+    tbl_set_public(ret.as.t, V_int(2), V_int(count));
+    
+    return ret;
+}
+
+/* string.retest(s, pattern [, flags]) -> boolean */
+static Value str_retest(struct VM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc < 2 || argv[0].tag != VAL_STR || argv[1].tag != VAL_STR) 
+        return V_bool(0);
+    
+    const char *s = argv[0].as.s->data;
+    const char *pattern = argv[1].as.s->data;
+    
+    /* Parse flags */
+    int cflags = 0;
+    if (argc >= 3 && argv[2].tag == VAL_STR) {
+        const char *flags = argv[2].as.s->data;
+        for (int i = 0; flags[i]; i++) {
+            switch (flags[i]) {
+                case 'i': cflags |= REG_ICASE; break;
+                case 'm': cflags |= REG_NEWLINE; break;
+                default: break;
+            }
+        }
+    }
+    
+    /* Compile regex */
+    regex_t *preg = compile_regex_cached(pattern, cflags);
+    if (!preg) return V_bool(0);
+    
+    /* Test */
+    int ret = regexec(preg, s, 0, NULL, 0);
+    
+    regfree(preg);
+    free(preg);
+    
+    return V_bool(ret == 0);
+}
 /* Register the complete string library */
 void register_string_lib(struct VM *vm) {
   Value S = V_table();
@@ -1192,7 +1544,10 @@ void register_string_lib(struct VM *vm) {
   tbl_set_public(S.as.t, V_str_from_c("reverse"), (Value){.tag=VAL_CFUNC,.as.cfunc=str_reverse});
   tbl_set_public(S.as.t, V_str_from_c("sub"),     (Value){.tag=VAL_CFUNC,.as.cfunc=str_sub});
   tbl_set_public(S.as.t, V_str_from_c("upper"),   (Value){.tag=VAL_CFUNC,.as.cfunc=str_upper});
-  
+   tbl_set_public(S.as.t, V_str_from_c("refind"),  (Value){.tag=VAL_CFUNC,.as.cfunc=str_refind});
+  tbl_set_public(S.as.t, V_str_from_c("rematch"), (Value){.tag=VAL_CFUNC,.as.cfunc=str_rematch});
+  tbl_set_public(S.as.t, V_str_from_c("regsub"),  (Value){.tag=VAL_CFUNC,.as.cfunc=str_regsub});
+  tbl_set_public(S.as.t, V_str_from_c("retest"),  (Value){.tag=VAL_CFUNC,.as.cfunc=str_retest});
   /* Lua++ extensions */
   tbl_set_public(S.as.t, V_str_from_c("length"),  (Value){.tag=VAL_CFUNC,.as.cfunc=str_length});
 
