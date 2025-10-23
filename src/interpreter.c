@@ -289,7 +289,9 @@ static Value call_function(VM *vm, Func *fn, int argc, Value *argv){
     AST *id = fn->params.items[i];
     const char *nm = (id && id->kind==AST_IDENT) ? id->as.ident.name : "";
     Value val = (i<argc)? argv[i] : V_nil();
-    env_add(vm->env, nm, val, true);
+    if(!env_set(vm->env,nm,val)){
+        env_add(vm->env, nm, val, true);
+    }
   }
   if(fn->vararg){
     Value vargs = V_table();
