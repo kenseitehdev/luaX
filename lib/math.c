@@ -1,4 +1,6 @@
 // lib/math.c
+#define _USE_MATH_DEFINES
+#define _GNU_SOURCE
 #include <math.h>
 #include <stdlib.h>
 #include <limits.h>

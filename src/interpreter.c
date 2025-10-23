@@ -1307,7 +1307,6 @@ int interpret(AST *root){
     const char *rocks_tree1   = "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
     const char *rocks_tree2   = "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua";
     const char *local_tree    = "?.lua;?/init.lua;./?.lua;./?/init.lua";
-    char path_buf[2048];
     if (lua_path_env && *lua_path_env) {
       snprintf(path_buf, sizeof(path_buf), "%s;%s;%s;%s",
                lua_path_env, local_tree, rocks_tree1, rocks_tree2);

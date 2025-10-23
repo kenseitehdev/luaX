@@ -11,18 +11,24 @@ Value op_len(Value v){
   }
   return V_int(0);
 }
-FILE* open_string_as_FILE(const char *code) {
-    if (!code) code = "";
-#if defined(_GNU_SOURCE) || defined(__GLIBC__)
-    FILE *f = fmemopen((void*)code, strlen(code), "r");
-    if (f) return f;
-#endif
+FILE *open_string_as_FILE(const char *code) {
+#ifdef __APPLE__
+    // macOS doesn’t support fmemopen
     FILE *f = tmpfile();
     if (!f) return NULL;
-    size_t len = strlen(code);
-    if (len && fwrite(code, 1, len, f) != len) { fclose(f); return NULL; }
+    fwrite(code, 1, strlen(code), f);
     rewind(f);
     return f;
+#else
+    FILE *f = fmemopen((void *)code, strlen(code), "r");
+    if (!f) {
+        f = tmpfile();
+        if (!f) return NULL;
+        fwrite(code, 1, strlen(code), f);
+        rewind(f);
+    }
+    return f;
+#endif
 }
 void print_value(Value v){
   switch(v.tag){
