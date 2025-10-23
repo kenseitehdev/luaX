@@ -186,17 +186,9 @@ case '/': {
     int d = peek(fp);
     if (d == '/') {
         fgetc(fp); // consume the second '/'
-        // skip rest of line (comment)
-        while ((c = fgetc(fp)) != EOF && c != '\n');
-        if (c == '\n') line_no++;
-        return next(fp); // recursively get the next token
+        MAKE_TOK(TOK_IDIV, "//", 2);  // This returns the token
     } else {
-        Token t;
-        t.type = TOK_SLASH;
-        t.lexeme = strdup("/");
-        t.len = 1;
-        t.line = token_line;
-        return t;
+        MAKE_TOK(TOK_SLASH, "/", 1);  // This returns the token
     }
 }
         case '%': MAKE_TOK(TOK_MOD,    "%", 1);

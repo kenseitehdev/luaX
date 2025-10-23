@@ -423,20 +423,6 @@ static Value eval_expr(VM *vm, AST *n){
           vm_raise(vm, V_str_from_c("attempt to perform arithmetic on a non-number"));
           return V_nil();
         }
-case OP_IDIV: {
-    Value right = vm_pop(vm);   
-    Value left  = vm_pop(vm);
-    double l = (left.tag == VAL_INT) ? (double)left.as.i :
-               (left.tag == VAL_NUM) ? left.as.n : 0.0;
-    double r = (right.tag == VAL_INT) ? (double)right.as.i :
-               (right.tag == VAL_NUM) ? right.as.n : 0.0;
-    if (r == 0.0) {
-        vm_raise(vm, V_str_from_c("integer division by zero"));
-    }
-    long long res = (long long)floor(l / r);
-    vm_push(vm,V_int(res));  
-    break;
-}
         case OP_DIV: {
           if ((L.tag==VAL_INT||L.tag==VAL_NUM) && (R.tag==VAL_INT||R.tag==VAL_NUM))
             return V_num(as_num(L) / as_num(R));
@@ -444,6 +430,21 @@ case OP_IDIV: {
           vm_raise(vm, V_str_from_c("attempt to perform arithmetic on a non-number"));
           return V_nil();
         }
+                     case OP_IDIV: {
+  if ((L.tag==VAL_INT||L.tag==VAL_NUM) && (R.tag==VAL_INT||R.tag==VAL_NUM)) {
+    double l = as_num(L);
+    double r = as_num(R);
+    if (r == 0.0) {
+      vm_raise(vm, V_str_from_c("integer division by zero"));
+      return V_nil();
+    }
+    return V_int((long long)floor(l / r));
+  }
+  Value out; 
+  if (try_bin_mm(vm, "__idiv", L, R, &out)) return out;
+  vm_raise(vm, V_str_from_c("attempt to perform arithmetic on a non-number"));
+  return V_nil();
+}
         case OP_MOD: {
           if (L.tag==VAL_INT && R.tag==VAL_INT) return V_int(L.as.i % R.as.i);
           if ((L.tag==VAL_INT||L.tag==VAL_NUM) && (R.tag==VAL_INT||R.tag==VAL_NUM))

@@ -218,7 +218,7 @@ static int precedence_of(TokenType t){
     case TOK_EQ: case TOK_NE: case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE: return 3;
     case TOK_CONCAT: return 4; /* right-assoc */
     case TOK_PLUS: case TOK_MINUS: return 5;
-    case TOK_STAR: case TOK_SLASH: case TOK_MOD: return 6;
+    case TOK_STAR: case TOK_SLASH: case TOK_IDIV: case TOK_MOD: return 6;
     case TOK_POW: return 7; /* right-assoc */
     default: return 0;
   }
