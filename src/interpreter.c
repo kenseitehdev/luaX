@@ -225,7 +225,7 @@ Value builtin_type(struct VM *vm, int argc, Value *argv){
 }
 static Value builtin__VERSION(struct VM *vm, int argc, Value *argv){
   (void)vm;(void)argc;(void)argv;
-  return V_str_from_c("LuaX 1.0.2");
+  return V_str_from_c("LuaX 1.0.3");
 }
 char* read_entire_file(const char *path, size_t *out_len){
     FILE *f = fopen(path, "rb");
