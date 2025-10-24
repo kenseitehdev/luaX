@@ -119,6 +119,7 @@ typedef struct VM {
   CoResumePoint co_point;  /* where to resume inside a block */
   Env  *co_call_env;       /* the coroutine's active call env (saved across yields) */
   Coroutine *active_co;    /* which coroutine (if any) is running on this VM */
+  int current_line;
 } VM;
 
 /* API */

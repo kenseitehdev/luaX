@@ -4,7 +4,8 @@
 #include <math.h>
 #include <stdint.h> 
 #include <ctype.h>
-#include <setjmp.h> 
+#include <setjmp.h>
+#include <dlfcn.h>
 #include "../include/parser.h"
 #include "../include/builtins.h"
 #include "../include/lexer.h"
@@ -348,6 +349,7 @@ static void assign_index(VM *vm, Value table, Value key, Value val){
   (void)call_any(vm, mm, 3, argv3);
 }
 static Value eval_expr(VM *vm, AST *n){
+  vm->current_line=n->line;
   switch(n->kind){
     case AST_NIL:   return V_nil();
     case AST_BOOL:  return V_bool(n->as.bval.v);
@@ -889,14 +891,17 @@ case AST_GOTO: {
       }
       case AST_FOR_IN: {
         size_t nvars = st->as.forin.names.count;
-        for (size_t i=0;i<nvars;i++){
+        for (size_t i = 0; i < nvars; i++) {
           AST *id = st->as.forin.names.items[i];
-          const char *nm = (id && id->kind==AST_IDENT) ? id->as.ident.name : "";
+          const char *nm = (id && id->kind == AST_IDENT) ? id->as.ident.name : "";
           env_add(vm->env, nm, V_nil(), true);
         }
+
         size_t niters = st->as.forin.iters.count;
         if (niters == 1) {
           Value it0 = eval_expr(vm, st->as.forin.iters.items[0]);
+
+          /* --- generic iterator triple {iterF, state, ctrl} --- */
           if (it0.tag == VAL_TABLE) {
             Value iterV, stateV, ctrlV;
             int has1 = tbl_get(it0.as.t, V_int(1), &iterV);
@@ -905,9 +910,9 @@ case AST_GOTO: {
             if (has1 && has2 && has3 && is_callable(iterV)) {
               long long iters_guard = 0;
               Value iterF = iterV, state = stateV, ctrl = ctrlV;
-              for(;;){
-                if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS){
-                  fprintf(stderr,"[LuaX]: for-in (ipairs/generic) exceeded %d iterations at line %d\n",
+              for (;;) {
+                if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS) {
+                  fprintf(stderr, "[LuaX]: for-in (ipairs/generic) exceeded %d iterations at line %d\n",
                           LUA_PLUS_MAX_LOOP_ITERS, st->line);
                   break;
                 }
@@ -924,52 +929,89 @@ case AST_GOTO: {
                 }
                 assign_loop_vars(vm, st, a, b);
                 ctrl = a;
-                vm->break_flag=false;
+                vm->break_flag = false;
                 exec_block(vm, st->as.forin.body);
                 if (vm->has_ret) break;
-                if (vm->pending_goto){
+                if (vm->pending_goto) {
                   int idx = find_label_index(labels, lab_count, vm->goto_label);
-                  if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto=false; break; }
-                  else { vm->env = saved; if(labels) free(labels); return; }
+                  if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto = false; break; }
+                  else { vm->env = saved; if (labels) free(labels); return; }
                 }
-                if (vm->break_flag){ vm->break_flag=false; break; }
+                if (vm->break_flag) { vm->break_flag = false; break; }
               }
-              pc++;
-              break;
+              pc++; break;
             }
           }
+
+          /* --- direct table iteration --- */
           if (it0.tag == VAL_TABLE) {
             Table *tt = it0.as.t;
             long long iters_guard = 0;
             int stop = 0;
-            for (int bi = 0; bi < tt->cap && !stop; ++bi) {
-              for (TableEntry *e = tt->buckets[bi]; e && !stop; e = e->next) {
-                if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS){
-                  fprintf(stderr,"[LuaX]: for-in (table) exceeded %d iterations at line %d\n",
+
+            Value tmp;
+            bool is_array_like = tbl_get(tt, V_int(1), &tmp);
+
+            if (is_array_like) {
+              /* Ordered numeric iteration (array-like) */
+              for (long long i = 1;; i++) {
+                if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS) {
+                  fprintf(stderr, "[LuaX]: for-in (array) exceeded %d iterations at line %d\n",
                           LUA_PLUS_MAX_LOOP_ITERS, st->line);
                   break;
                 }
-                if (nvars <= 1) assign_loop_vars(vm, st, e->val, V_nil());
-                else            assign_loop_vars(vm, st, e->key, e->val);
-                vm->break_flag=false;
+                Value val;
+                if (!tbl_get(tt, V_int(i), &val)) break;
+                if (nvars <= 1)
+                  assign_loop_vars(vm, st, val, V_nil());
+                else
+                  assign_loop_vars(vm, st, V_int(i), val);
+
+                vm->break_flag = false;
                 exec_block(vm, st->as.forin.body);
                 if (vm->has_ret) { stop = 1; break; }
-                if (vm->pending_goto){
+                if (vm->pending_goto) {
                   int idx = find_label_index(labels, lab_count, vm->goto_label);
-                  if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto=false; stop = 1; break; }
-                  else { vm->env = saved; if(labels) free(labels); return; }
+                  if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto = false; stop = 1; break; }
+                  else { vm->env = saved; if (labels) free(labels); return; }
                 }
-                if (vm->break_flag){ vm->break_flag=false; stop = 1; break; }
+                if (vm->break_flag) { vm->break_flag = false; stop = 1; break; }
+              }
+            } else {
+              /* Unordered hash iteration */
+              for (int bi = 0; bi < tt->cap && !stop; ++bi) {
+                for (TableEntry *e = tt->buckets[bi]; e && !stop; e = e->next) {
+                  if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS) {
+                    fprintf(stderr, "[LuaX]: for-in (table) exceeded %d iterations at line %d\n",
+                            LUA_PLUS_MAX_LOOP_ITERS, st->line);
+                    break;
+                  }
+                  if (nvars <= 1)
+                    assign_loop_vars(vm, st, e->val, V_nil());
+                  else
+                    assign_loop_vars(vm, st, e->key, e->val);
+
+                  vm->break_flag = false;
+                  exec_block(vm, st->as.forin.body);
+                  if (vm->has_ret) { stop = 1; break; }
+                  if (vm->pending_goto) {
+                    int idx = find_label_index(labels, lab_count, vm->goto_label);
+                    if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto = false; stop = 1; break; }
+                    else { vm->env = saved; if (labels) free(labels); return; }
+                  }
+                  if (vm->break_flag) { vm->break_flag = false; stop = 1; break; }
+                }
               }
             }
-            pc++;
-            break;
+            pc++; break;
           }
+
+          /* --- callable iterator function --- */
           if (is_callable(it0)) {
             long long iters_guard = 0;
             for (;;) {
-              if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS){
-                fprintf(stderr,"[LuaX]: for-in (iter) exceeded %d iterations at line %d\n",
+              if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS) {
+                fprintf(stderr, "[LuaX]: for-in (iter) exceeded %d iterations at line %d\n",
                         LUA_PLUS_MAX_LOOP_ITERS, st->line);
                 break;
               }
@@ -982,22 +1024,23 @@ case AST_GOTO: {
                 if (tbl_get(res.as.t, V_int(2), &tmp)) b = tmp;
               }
               assign_loop_vars(vm, st, a, b);
-              vm->break_flag=false;
+              vm->break_flag = false;
               exec_block(vm, st->as.forin.body);
               if (vm->has_ret) break;
-              if (vm->pending_goto){
+              if (vm->pending_goto) {
                 int idx = find_label_index(labels, lab_count, vm->goto_label);
-                if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto=false; break; }
-                else { vm->env = saved; if(labels) free(labels); return; }
+                if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto = false; break; }
+                else { vm->env = saved; if (labels) free(labels); return; }
               }
-              if (vm->break_flag){ vm->break_flag=false; break; }
+              if (vm->break_flag) { vm->break_flag = false; break; }
             }
-            pc++;
-            break;
+            pc++; break;
           }
-          pc++;
-          break;
+
+          pc++; break;
         }
+
+        /* --- generic multi-expression for-in --- */
         {
           Value iter = eval_expr(vm, st->as.forin.iters.items[0]);
           Value state = V_nil();
@@ -1005,10 +1048,11 @@ case AST_GOTO: {
           if (niters >= 2) state = eval_expr(vm, st->as.forin.iters.items[1]);
           if (niters >= 3) ctrl  = eval_expr(vm, st->as.forin.iters.items[2]);
           if (!is_callable(iter)) { pc++; break; }
+
           long long iters_guard = 0;
-          for(;;){
-            if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS){
-              fprintf(stderr,"[LuaX]: for-in (generic) exceeded %d iterations at line %d\n",
+          for (;;) {
+            if (++iters_guard > LUA_PLUS_MAX_LOOP_ITERS) {
+              fprintf(stderr, "[LuaX]: for-in (generic) exceeded %d iterations at line %d\n",
                       LUA_PLUS_MAX_LOOP_ITERS, st->line);
               break;
             }
@@ -1025,18 +1069,17 @@ case AST_GOTO: {
             }
             assign_loop_vars(vm, st, a, b);
             ctrl = a;
-            vm->break_flag=false;
+            vm->break_flag = false;
             exec_block(vm, st->as.forin.body);
             if (vm->has_ret) break;
-            if (vm->pending_goto){
+            if (vm->pending_goto) {
               int idx = find_label_index(labels, lab_count, vm->goto_label);
-              if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto=false; break; }
-              else { vm->env = saved; if(labels) free(labels); return; }
+              if (idx >= 0) { pc = (size_t)idx + 1; vm->pending_goto = false; break; }
+              else { vm->env = saved; if (labels) free(labels); return; }
             }
-            if (vm->break_flag){ vm->break_flag=false; break; }
+            if (vm->break_flag) { vm->break_flag = false; break; }
           }
-          pc++;
-          break;
+          pc++; break;
         }
       }
       case AST_BREAK:
@@ -1181,6 +1224,7 @@ case AST_VAR: {
   if(labels) free(labels);
 }
 static void exec_stmt(VM *vm, AST *n){
+  vm->current_line = n->line;
   if(n->kind==AST_BLOCK){ exec_block(vm,n); return; }
   AST fake; memset(&fake,0,sizeof(fake));
   fake.kind=AST_BLOCK;
@@ -1304,20 +1348,21 @@ int interpret(AST *root){
     Value loaded  = V_table();
     Value preload = V_table();
     Value searchers = V_table();
-    const char *lua_path_env  = getenv("LUA_PATH");
-    const char *rocks_tree1   = "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
-    const char *rocks_tree2   = "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua";
-    const char *local_tree    = "?.lua;?/init.lua;./?.lua;./?/init.lua";
-    if (lua_path_env && *lua_path_env) {
-      snprintf(path_buf, sizeof(path_buf), "%s;%s;%s;%s",
-               lua_path_env, local_tree, rocks_tree1, rocks_tree2);
-    } else {
-      snprintf(path_buf, sizeof(path_buf), "%s;%s;%s",
-               local_tree, rocks_tree1, rocks_tree2);
-    }
+const char *lua_path_env  = getenv("LUA_PATH");
+const char *rocks_tree1   = "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
+const char *rocks_tree2   = "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua";
+const char *local_tree    = "?.lua;?/init.lua;./?.lua;./?/init.lua";
+const char *user_tree     = "~/.luarocks/share/lua/5.4/?.lua;~/.luarocks/share/lua/5.4/?/init.lua";
+if (lua_path_env && *lua_path_env) {
+  snprintf(path_buf, sizeof(path_buf), "%s;%s;%s;%s",
+           lua_path_env, local_tree, rocks_tree1, rocks_tree2);
+} else {
+  snprintf(path_buf, sizeof(path_buf), "%s;%s;%s",
+           local_tree, rocks_tree1, rocks_tree2);
+}
 const char *lua_cpath_env = getenv("LUA_CPATH");
-const char *cpath_default = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so";
 char cpath_buf[2048];
+const char *cpath_default = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so;~/.luarocks/lib/lua/5.4/?.so";
 const char *cpath_final;
 if (lua_cpath_env && *lua_cpath_env) {
   snprintf(cpath_buf, sizeof(cpath_buf), "%s;%s", lua_cpath_env, cpath_default);
