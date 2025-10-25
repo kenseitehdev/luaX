@@ -1,5 +1,6 @@
 // lib/package.c
 // Package core library: package table, searchers (preload, Lua files, C libs), require(), loadlib().
+// UPDATED with Lua C API compatibility for LuaRocks modules
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,7 @@
 #include <ctype.h>
 
 #include "../include/interpreter.h"   // brings interpreter.h / Value / CFunc etc.
+#include "../include/lua_compat.h"    // NEW: Lua C API compatibility layer
 
 /* If you have a real file loader, compile with -DHAVE_VM_LOAD_AND_RUN_FILE
    and provide: Value vm_load_and_run_file(VM*, const char*, const char*);
@@ -69,10 +71,13 @@ static DLHandle cache_add_handle(const char *path, DLHandle h) {
 /* ===== VM/Env/Table helpers provided elsewhere ===== */
 extern Env*   env_root(Env *e);
 extern void   env_add(Env *e, const char *name, Value v, bool is_local);
+extern int    env_get(Env *e, const char *name, Value *out);
 extern int    tbl_get(Table *t, Value key, Value *out);
 extern void   tbl_set(Table *t, Value key, Value val);
+extern Value  call_any(VM *vm, Value cal, int argc, Value *argv);
 extern Value  call_any_public(VM *vm, Value cal, int argc, Value *argv);
 extern void   vm_raise(VM *vm, Value err);
+extern int    is_callable(Value v);
 
 /* ===== Local helpers ===== */
 
@@ -177,7 +182,7 @@ static Value pkg_preload_searcher(VM *vm, int argc, Value *argv) {
   if (preload.tag != VAL_TABLE) return V_str_from_c("preload searcher: package.preload is not a table");
 
   Value loader;
-  if (tbl_get(preload.as.t, argv[0], &loader) && loader.tag == VAL_CFUNC) {
+  if (tbl_get(preload.as.t, argv[0], &loader) && (loader.tag == VAL_CFUNC || loader.tag == VAL_FUNC)) {
     Value tup = V_table();               /* { loader, modname } */
     tbl_set(tup.as.t, V_int(1), loader);
     tbl_set(tup.as.t, V_int(2), argv[0]);
@@ -199,6 +204,8 @@ static Value lua_file_loader(VM *vm, int argc, Value *argv) {
 #ifdef HAVE_VM_LOAD_AND_RUN_FILE
   return vm_load_and_run_file(vm, path, modname);
 #else
+  (void)modname;
+  (void)path;
   return V_str_from_c("lua file loader: vm_load_and_run_file() not available");
 #endif
 }
@@ -263,12 +270,15 @@ static Value builtin_loadlib(VM *vm, int argc, Value *argv) {
   const char *path = argv[0].as.s->data;
   const char *init = argv[1].as.s->data;
 
+  fprintf(stderr, "[LOADLIB] Opening: %s, symbol: %s\n", path, init);
+
   /* 1) get or open the handle */
   DLHandle h = cache_lookup_open_handle(path);
   if (!h) {
     h = dl_open(path);
     if (!h) {
       const char *err = dl_error();
+      fprintf(stderr, "[LOADLIB] dlopen failed: %s\n", err);
       size_t L = strlen("loadlib: dlopen failed: ") + strlen(err) + 1;
       char *buf = (char*)malloc(L);
       if (!buf) return V_str_from_c("loadlib: OOM");
@@ -276,16 +286,21 @@ static Value builtin_loadlib(VM *vm, int argc, Value *argv) {
       Value r = V_str_from_c(buf); free(buf);
       return r;
     }
+    fprintf(stderr, "[LOADLIB] dlopen succeeded: %p\n", (void*)h);
     if (!cache_add_handle(path, h)) {
       /* caching failed; we still keep h open so the symbol stays valid */
+      fprintf(stderr, "[LOADLIB] Warning: failed to cache handle\n");
     }
+  } else {
+    fprintf(stderr, "[LOADLIB] Using cached handle: %p\n", (void*)h);
   }
 
   /* 2) resolve the init symbol */
-  typedef Value (*InitFn)(VM*, int, Value*);
+  typedef int (*LuaOpenFunc)(lua_State*);  // Standard Lua C function signature
   void *sym = dl_sym(h, init);
   if (!sym) {
     const char *err = dl_error();
+    fprintf(stderr, "[LOADLIB] dlsym failed: %s\n", err);
     size_t L = strlen("loadlib: symbol not found: ") + strlen(err) + 1;
     char *buf = (char*)malloc(L);
     if (!buf) return V_str_from_c("loadlib: OOM");
@@ -294,11 +309,14 @@ static Value builtin_loadlib(VM *vm, int argc, Value *argv) {
     return r;
   }
 
-  InitFn fn = (InitFn)sym;
+  fprintf(stderr, "[LOADLIB] dlsym succeeded: %p\n", sym);
 
-  /* 3) wrap as a CFunc Value */
+  LuaOpenFunc fn = (LuaOpenFunc)sym;
+
+  /* 3) wrap as a CFunc Value - store the raw function pointer */
+  /* The caller (c_module_loader) will handle calling it through compat layer */
   Value c; c.tag = VAL_CFUNC;
-  c.as.cfunc = (CFunc)fn;  /* signatures match your VM expectation */
+  c.as.cfunc = (CFunc)fn;  
   return c;
 }
 
@@ -358,7 +376,7 @@ static Value pkg_clib_searcher(VM *vm, int argc, Value *argv) {
     return V_str_from_c("clib searcher: not found in package.cpath");
   }
 
-  /* Return { loader_func, path, initname } (we’ll pass both to loader) */
+  /* Return { loader_func, path, initname } (we'll pass both to loader) */
   Value tup = V_table();
   Value loader; loader.tag = VAL_CFUNC; loader.as.cfunc = c_module_loader;
   tbl_set(tup.as.t, V_int(1), loader);
@@ -370,7 +388,7 @@ static Value pkg_clib_searcher(VM *vm, int argc, Value *argv) {
   return tup;
 }
 
-/* loader that calls package.loadlib(found, initname), then calls the cfunc */
+/* loader that calls package.loadlib(found, initname), then calls the cfunc through compat layer */
 static Value c_module_loader(VM *vm2, int cargc, Value *cargv) {
   if (cargc < 3 || cargv[0].tag != VAL_STR || cargv[1].tag != VAL_STR || cargv[2].tag != VAL_STR)
     return V_str_from_c("c module loader: expected (modname, path, initname)");
@@ -379,7 +397,9 @@ static Value c_module_loader(VM *vm2, int cargc, Value *cargv) {
   const char *path    = cargv[1].as.s->data;
   const char *init    = cargv[2].as.s->data;
 
-  /* call loadlib(path, initname) to get cfunc */
+  fprintf(stderr, "[C MODULE] Loading: %s from %s (init: %s)\n", modname, path, init);
+
+  /* call loadlib(path, initname) to get the init function */
   Value loadlibV;
   Value pkg = (Value){ .tag = VAL_TABLE, .as.t = g_pkg };
   if (!tbl_get(pkg.as.t, V_str_from_c("loadlib"), &loadlibV) || loadlibV.tag != VAL_CFUNC)
@@ -390,98 +410,189 @@ static Value c_module_loader(VM *vm2, int cargc, Value *cargv) {
   args[1] = V_str_from_c(init);
 
   Value cf = call_any_public(vm2, loadlibV, 2, args);
-  if (cf.tag != VAL_CFUNC) return cf; /* likely an error string */
+  
+  if (cf.tag == VAL_STR) {
+    // loadlib returned an error message
+    fprintf(stderr, "[C MODULE] loadlib error: %s\n", cf.as.s->data);
+    return cf;
+  }
+  
+  if (cf.tag != VAL_CFUNC) {
+    fprintf(stderr, "[C MODULE] loadlib returned unexpected type: %d\n", cf.tag);
+    return V_str_from_c("c module loader: loadlib did not return a function");
+  }
 
-  /* Now call the cfunc as the module loader: cf(modname) */
-  Value modnameV = V_str_from_c(modname);
-  return call_any_public(vm2, cf, 1, &modnameV);
+  fprintf(stderr, "[C MODULE] loadlib succeeded, calling init function\n");
+
+  /* NOW USE THE COMPATIBILITY LAYER */
+  /* The cfunc from loadlib is actually a standard lua_CFunction: int (*)(lua_State*) */
+  /* We need to call it through the compatibility wrapper */
+  
+  typedef int (*LuaOpenFunc)(lua_State *L);
+  LuaOpenFunc lua_init = (LuaOpenFunc)cf.as.cfunc;
+  
+  /* Call through compatibility layer */
+  Value result = compat_call_cmodule_init(vm2, lua_init, modname);
+  
+  fprintf(stderr, "[C MODULE] Init function returned, result tag: %d\n", result.tag);
+  
+  return result;
 }
 
-/* ===== require(name) ===== */
+/* ===== require() implementation ===== */
 
-Value builtin_require(VM *vm, int argc, Value *argv) {
-  if (argc < 1 || argv[0].tag != VAL_STR) {
-    return V_str_from_c("require: module name must be a string");
-  }
-  Value modname = argv[0];
-  ensure_package_initialized(vm);
-
-  /* cache */
-  Value loaded = get_or_create_table_field(g_pkg, "loaded");
-  Value cached;
-  if (tbl_get(loaded.as.t, modname, &cached)) {
-    return cached;  /* return cached module (or true) */
-  }
-
-  /* iterate searchers */
-  Value searchers = get_or_create_table_field(g_pkg, "searchers");
-  long long idx = 1;
-  Value messages = V_str_from_c(""); /* aggregate errors */
-  while (1) {
-    Value s;
-    if (!tbl_get(searchers.as.t, V_int(idx), &s)) break;
-    idx++;
-    if (s.tag != VAL_CFUNC) continue;
-
-    Value res = call_any_public(vm, s, 1, &modname);
-
-    if (res.tag == VAL_TABLE) {
-      /* { loader, extra1, extra2? } */
-      Value loader, extra1, extra2;
-      (void)tbl_get(res.as.t, V_int(1), &loader);
-      (void)tbl_get(res.as.t, V_int(2), &extra1);
-      (void)tbl_get(res.as.t, V_int(3), &extra2);
-      if (loader.tag == VAL_CFUNC) {
-        Value args[3]; int cargc = 1;
-        args[0] = modname;
-        if (extra1.tag != VAL_NIL) args[cargc++] = extra1;
-        if (extra2.tag != VAL_NIL) args[cargc++] = extra2;
-
-        Value module_val = call_any_public(vm, loader, cargc, args);
-
-        /* If loader returns nil, store true */
-        if (module_val.tag == VAL_NIL) {
-          tbl_set(loaded.as.t, modname, V_bool(true));
-          return V_bool(true);
-        } else {
-          tbl_set(loaded.as.t, modname, module_val);
-          return module_val;
+Value builtin_require(struct VM *vm, int argc, Value *argv) {
+    if (argc < 1 || argv[0].tag != VAL_STR) {
+        vm_raise(vm, V_str_from_c("require: module name must be a string"));
+        return V_nil();
+    }
+    
+    const char *modname = argv[0].as.s->data;
+    fprintf(stderr, "[DEBUG] require() called for: %s\n", modname);
+    
+    // Get package table
+    Value pkg;
+    if (!env_get(env_root(vm->env), "package", &pkg) || pkg.tag != VAL_TABLE) {
+        fprintf(stderr, "[DEBUG] package table not found!\n");
+        vm_raise(vm, V_str_from_c("require: package table not found"));
+        return V_nil();
+    }
+    fprintf(stderr, "[DEBUG] package table found\n");
+    
+    // Check if already loaded
+    Value loaded;
+    if (tbl_get(pkg.as.t, V_str_from_c("loaded"), &loaded) && loaded.tag == VAL_TABLE) {
+        Value cached;
+        if (tbl_get(loaded.as.t, argv[0], &cached)) {
+            fprintf(stderr, "[DEBUG] Module already loaded from cache\n");
+            return cached;
         }
-      }
-    } else if (res.tag == VAL_STR) {
-      /* append message */
-      const char *old = messages.as.s->data;
-      const char *add = res.as.s->data;
-      size_t L = strlen(old), A = strlen(add);
-      char *buf = (char*)malloc(L + A + 2);
-      memcpy(buf, old, L);
-      buf[L] = '\n';
-      memcpy(buf + L + 1, add, A + 1);
-      messages = V_str_from_c(buf);
-      free(buf);
     }
-  }
-
-  /* not found */
-  {
-    const char *prefix = "module not found: ";
-    const char *name = modname.as.s->data;
-    size_t P = strlen(prefix), N = strlen(name);
-    size_t M = (messages.tag == VAL_STR) ? (size_t)messages.as.s->len : 0;
-    char *buf = (char*)malloc(P + N + 2 + M + 1);
-    memcpy(buf, prefix, P);
-    memcpy(buf + P, name, N);
-    buf[P+N] = '\n';
-    if (M && messages.tag == VAL_STR) {
-      memcpy(buf + P + N + 1, messages.as.s->data, M + 1);
-    } else {
-      buf[P+N+1] = 0;
+    fprintf(stderr, "[DEBUG] Module not in cache\n");
+    
+    // Get searchers
+    Value searchers;
+    if (!tbl_get(pkg.as.t, V_str_from_c("searchers"), &searchers) || searchers.tag != VAL_TABLE) {
+        fprintf(stderr, "[DEBUG] searchers not found!\n");
+        vm_raise(vm, V_str_from_c("require: package.searchers not found"));
+        return V_nil();
     }
-    Value err = V_str_from_c(buf);
-    free(buf);
-    vm_raise(vm, err);
+    fprintf(stderr, "[DEBUG] searchers table found\n");
+    
+    // Count searchers
+    int searcher_count = 0;
+    for (int i = 1; i <= 10; i++) {
+        Value s;
+        if (tbl_get(searchers.as.t, V_int(i), &s)) {
+            searcher_count = i;
+            fprintf(stderr, "[DEBUG] searcher[%d] exists, callable=%d\n", i, is_callable(s));
+        }
+    }
+    fprintf(stderr, "[DEBUG] Total searchers: %d\n", searcher_count);
+    
+    // Try each searcher
+    Value errors = V_table();
+    int err_count = 0;
+    
+    for (int i = 1; i <= searcher_count; i++) {
+        Value searcher;
+        if (!tbl_get(searchers.as.t, V_int(i), &searcher)) {
+            break;
+        }
+        
+        if (!is_callable(searcher)) {
+            fprintf(stderr, "[DEBUG] searcher[%d] not callable\n", i);
+            continue;
+        }
+        
+        fprintf(stderr, "[DEBUG] Calling searcher[%d]\n", i);
+        
+        // Call the searcher
+        Value loader_result = call_any(vm, searcher, 1, argv);
+        
+        fprintf(stderr, "[DEBUG] searcher[%d] returned tag=%d\n", i, loader_result.tag);
+        
+        if (loader_result.tag == VAL_NIL) {
+            fprintf(stderr, "[DEBUG] searcher[%d] returned nil\n", i);
+            continue;
+        }
+        
+        if (loader_result.tag == VAL_STR) {
+            fprintf(stderr, "[DEBUG] searcher[%d] returned error: %s\n", i, loader_result.as.s->data);
+            tbl_set(errors.as.t, V_int(++err_count), loader_result);
+            continue;
+        }
+        
+        fprintf(stderr, "[DEBUG] searcher[%d] found module!\n", i);
+        
+        // Searcher returned a table with loader info
+        // Extract the loader function (index 1) and its arguments
+        Value loader_fn;
+        if (loader_result.tag == VAL_TABLE) {
+            if (!tbl_get(loader_result.as.t, V_int(1), &loader_fn)) {
+                fprintf(stderr, "[DEBUG] No loader function at index 1\n");
+                continue;
+            }
+            
+            // Build arguments for the loader: [modname, arg2, arg3, ...]
+            Value loader_args[10];
+            int loader_argc = 0;
+            loader_args[loader_argc++] = argv[0];  // modname
+            
+            for (int j = 2; j <= 9; j++) {
+                Value arg;
+                if (tbl_get(loader_result.as.t, V_int(j), &arg)) {
+                    loader_args[loader_argc++] = arg;
+                } else {
+                    break;
+                }
+            }
+            
+            fprintf(stderr, "[DEBUG] Calling loader with %d args\n", loader_argc);
+            
+            // Call the loader
+            Value mod_result = call_any(vm, loader_fn, loader_argc, loader_args);
+            
+            fprintf(stderr, "[DEBUG] Loader returned tag=%d\n", mod_result.tag);
+            
+            if (mod_result.tag == VAL_NIL) {
+                mod_result = V_bool(true);
+            }
+            
+            // Cache the result
+            if (tbl_get(pkg.as.t, V_str_from_c("loaded"), &loaded) && loaded.tag == VAL_TABLE) {
+                tbl_set(loaded.as.t, argv[0], mod_result);
+            }
+            
+            return mod_result;
+        }
+    }
+    
+    fprintf(stderr, "[DEBUG] No searcher found the module\n");
+    
+    // No searcher found the module
+    char err_msg[2048];
+    int pos = snprintf(err_msg, sizeof(err_msg), "module '%s' not found:", modname);
+    
+    // Add searcher-specific error messages
+    const char *searcher_names[] = {"preload", "filesystem", "clib"};
+    for (int i = 1; i <= err_count && i <= 3; i++) {
+        Value err;
+        if (tbl_get(errors.as.t, V_int(i), &err) && err.tag == VAL_STR) {
+            pos += snprintf(err_msg + pos, sizeof(err_msg) - pos, 
+                          "\n\t%s searcher: %s", 
+                          i <= 3 ? searcher_names[i-1] : "unknown",
+                          err.as.s->data);
+        } else {
+            pos += snprintf(err_msg + pos, sizeof(err_msg) - pos,
+                          "\n\t%s searcher: not found in package.%s",
+                          i <= 3 ? searcher_names[i-1] : "unknown",
+                          i == 1 ? "preload" : i == 2 ? "path" : "cpath");
+        }
+    }
+    
+    vm_raise(vm, V_str_from_c(err_msg));
     return V_nil();
-  }
 }
 
 /* ===== init & public API ===== */
