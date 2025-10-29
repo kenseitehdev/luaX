@@ -51,7 +51,8 @@ VM *vm_create_repl(void) {
     env_add(vm->env, "_VERSION", V_str_from_c("LuaX 1.0"), false);
     env_add(vm->env, "xpcall", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_xpcall}, false);
     env_add(vm->env, "pcall", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pcall}, false);
-
+    env_add_builtins(vm);  // <- ADD THIS LINE
+    register_libs(vm); 
     Value package = V_table();
     Value loaded = V_table();
     Value preload = V_table();

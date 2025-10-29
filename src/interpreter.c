@@ -1652,6 +1652,7 @@ int interpret(AST *root){
   
   env_add_builtins(&vm);
   
+  register_libs(&vm);
   // Set up the package system
   {
     Value package = V_table();
@@ -1714,7 +1715,6 @@ int interpret(AST *root){
     env_add(vm.env, "package", package, false);
   }
   
-  register_libs(&vm);
   exec_stmt(&vm, root);
   
   return 0;
