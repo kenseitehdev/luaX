@@ -10,7 +10,7 @@
 #include "../include/util.h"
 #include "../include/interpreter.h"
 
-#define LUAX_VERSION "1.0.3"
+#define LUAX_VERSION "1.0.4"
 
 Token *tokens = NULL;
 int tokenCount = 0;

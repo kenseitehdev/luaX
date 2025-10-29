@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <setjmp.h>
 #include <dlfcn.h>
+#include <unistd.h>
 #include "../include/parser.h"
 #include "../include/builtins.h"
 #include "../include/lexer.h"
@@ -18,7 +19,7 @@ unsigned long long hash_value(Value v){
       union { double d; unsigned long long u; } u = { .d = (double)v.as.i };
       return hash_mix(u.u);
     }
-    case VAL_NUM: {
+    case VAL_NUM: { 
       union{ double d; unsigned long long u; }u={.d=v.as.n};
       return hash_mix(u.u);
     }
@@ -225,7 +226,7 @@ Value builtin_type(struct VM *vm, int argc, Value *argv){
 }
 static Value builtin__VERSION(struct VM *vm, int argc, Value *argv){
   (void)vm;(void)argc;(void)argv;
-  return V_str_from_c("LuaX 1.0.3");
+  return V_str_from_c("LuaX 1.0.4");
 }
 char* read_entire_file(const char *path, size_t *out_len){
     FILE *f = fopen(path, "rb");
@@ -1232,30 +1233,18 @@ static void exec_stmt(VM *vm, AST *n){
   fake.as.block.stmts=v;
   exec_block(vm,&fake);
 }
-static const char *default_package_path(void){
-  const char *env54 = getenv("LUA_PATH_5_4");
-  const char *env   = getenv("LUA_PATH");
-  if (env54 && *env54) return env54;
-  if (env   && *env)   return env;
-  return "?.lua;?/init.lua;"                    
-         "./?.lua;./?/init.lua;"                 
-         "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua;"
-         "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua;"
-         "/usr/local/lib/luarocks/rocks-5.4/?/init.lua;/usr/local/lib/luarocks/rocks-5.4/?.lua;"
-         "/usr/local/lib/lua/5.4/?.lua;/usr/local/lib/luarocks/rocks-5.4/?/init.lua";
-}
 static Value ensure_package(VM *vm){
   Value pkg;
   if (!env_get(env_root(vm->env), "package", &pkg) || pkg.tag != VAL_TABLE){
     pkg = V_table();
-    tbl_set(pkg.as.t, V_str_from_c("path"), V_str_from_c(default_package_path()));
     tbl_set(pkg.as.t, V_str_from_c("loaded"), V_table());
     tbl_set(pkg.as.t, V_str_from_c("preload"), V_table());
     env_add(env_root(vm->env), "package", pkg, false);
   } else {
     Value v;
-    if (!tbl_get(pkg.as.t, V_str_from_c("path"), &v) || v.tag!=VAL_STR)
-      tbl_set(pkg.as.t, V_str_from_c("path"), V_str_from_c(default_package_path()));
+    if (!tbl_get(pkg.as.t, V_str_from_c("path"), &v) || v.tag!=VAL_STR) {
+      // If path doesn't exist, we could set a default here if needed
+    }
     if (!tbl_get(pkg.as.t, V_str_from_c("loaded"), &v) || v.tag!=VAL_TABLE)
       tbl_set(pkg.as.t, V_str_from_c("loaded"), V_table());
     if (!tbl_get(pkg.as.t, V_str_from_c("preload"), &v) || v.tag!=VAL_TABLE)
@@ -1291,12 +1280,14 @@ static char *expand_one(const char *templ, const char *modpath){
 static FILE *search_module_file(Value packageV, const char *name, char **used_path_out){
   char *modpath = modname_to_path(name);
   Value pathV;
-  const char *path = default_package_path();
+  const char *path = "?.lua;?/init.lua;./?.lua;./?/init.lua";  // ADD DEFAULT
+  
   if (packageV.tag==VAL_TABLE &&
       tbl_get(packageV.as.t, V_str_from_c("path"), &pathV) &&
       pathV.tag==VAL_STR){
     path = pathV.as.s->data;
   }
+  
   const char *p = path;
   while (*p){
     const char *q = p;
@@ -1331,8 +1322,324 @@ static FILE *search_module_file(Value packageV, const char *name, char **used_pa
   free(modpath);
   return NULL;
 }
+
+static char *modname_to_cfuncname(const char *name) {
+    const char *last_part = name;
+    const char *dot = strrchr(name, '.');
+    if (dot) last_part = dot + 1;
+    
+    size_t n = strlen(last_part);
+    char *func_name = (char*)xmalloc(n + 16);  // "luaopen_" + name + null
+    strcpy(func_name, "luaopen_");
+    
+    // Copy and replace non-alphanumeric chars with underscore
+    for (size_t i = 0; i < n; i++) {
+        char c = last_part[i];
+        func_name[8 + i] = (isalnum(c)) ? c : '_';
+    }
+    func_name[8 + n] = '\0';
+    return func_name;
+}
+
+// Add this function to search and load C modules
+static Value clib_loader(VM *vm, const char *modname, Value packageV) {
+    Value cpath_val;
+    const char *cpath = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so";
+    
+    if (packageV.tag == VAL_TABLE &&
+        tbl_get(packageV.as.t, V_str_from_c("cpath"), &cpath_val) &&
+        cpath_val.tag == VAL_STR) {
+        cpath = cpath_val.as.s->data;
+    }
+    
+    char *modpath = modname_to_path(modname);
+    const char *p = cpath;
+    void *handle = NULL;
+    char *successful_path = NULL;
+    
+    while (*p) {
+        const char *q = p;
+        while (*q && *q != ';') q++;
+        size_t len = (size_t)(q - p);
+        char *templ = (char*)xmalloc(len + 1);
+        memcpy(templ, p, len);
+        templ[len] = '\0';
+        
+        char *so_path = expand_one(templ, modpath);
+        free(templ);
+        
+        // Try to load the shared library
+        handle = dlopen(so_path, RTLD_NOW | RTLD_GLOBAL);
+        if (handle) {
+            successful_path = so_path;
+            break;
+        }
+        
+        free(so_path);
+        if (*q == ';') q++;
+        p = q;
+    }
+    
+    free(modpath);
+    
+    if (!handle) {
+        return V_nil();  // Not found
+    }
+    
+    // Look for luaopen_<modname> function
+    char *func_name = modname_to_cfuncname(modname);
+    
+    typedef Value (*luaopen_func)(VM*, int, Value*);
+    luaopen_func opener = (luaopen_func)dlsym(handle, func_name);
+    
+    free(func_name);
+    
+    if (!opener) {
+        dlclose(handle);
+        free(successful_path);
+        return V_nil();
+    }
+    
+    // Call the luaopen function
+    Value result = opener(vm, 0, NULL);
+    free(successful_path);
+    
+    return result;
+}
+
+// Update builtin_preload_searcher
+static Value builtin_preload_searcher(VM *vm, int argc, Value *argv) {
+    if (argc < 1 || argv[0].tag != VAL_STR) return V_nil();
+    
+    Value pkg = ensure_package(vm);
+    Value preload;
+    if (!tbl_get(pkg.as.t, V_str_from_c("preload"), &preload) || 
+        preload.tag != VAL_TABLE) {
+        return V_str_from_c("\n\tno field package.preload");
+    }
+    
+    Value loader;
+    if (tbl_get(preload.as.t, argv[0], &loader)) {
+        return loader;
+    }
+    
+    // Return error string, not nil
+    char err[256];
+    snprintf(err, sizeof(err), "\n\tno field package.preload['%s']", argv[0].as.s->data);
+    return V_str_from_c(err);
+}
+
+// Update builtin_file_searcher
+static Value builtin_file_searcher(VM *vm, int argc, Value *argv) {
+    if (argc < 1 || argv[0].tag != VAL_STR) return V_nil();
+    
+    const char *modname = argv[0].as.s->data;
+    Value pkg = ensure_package(vm);
+    
+    char *used_path = NULL;
+    FILE *f = search_module_file(pkg, modname, &used_path);
+    
+    if (!f) {
+        // Return error message showing where we searched
+        Value pathV;
+        if (tbl_get(pkg.as.t, V_str_from_c("path"), &pathV) && pathV.tag == VAL_STR) {
+            char err[512];
+            snprintf(err, sizeof(err), "\n\tno file '%s' in path:\n\t\t%s", 
+                    modname, pathV.as.s->data);
+            return V_str_from_c(err);
+        }
+        return V_str_from_c("\n\tno file found");
+    }
+    
+    // Create a loader function that will compile and run the file
+    AST *program = compile_chunk_from_FILE(f);
+    fclose(f);
+    
+    if (!program) {
+        if (used_path) free(used_path);
+        return V_str_from_c("\n\tsyntax error in module");
+    }
+    
+    // Create a function that wraps this module
+    Func *fn = xmalloc(sizeof(*fn));
+    memset(fn, 0, sizeof(*fn));
+    fn->params = (ASTVec){0};
+    fn->vararg = false;
+    fn->body = program;
+    fn->env = vm->env;
+    
+    Value loader;
+    loader.tag = VAL_FUNC;
+    loader.as.fn = fn;
+    
+    if (used_path) free(used_path);
+    return loader;
+}
+
+// Update builtin_clib_searcher with debug output AND error messages
+static Value builtin_clib_searcher(VM *vm, int argc, Value *argv) {
+    if (argc < 1 || argv[0].tag != VAL_STR) return V_nil();
+    
+    const char *modname = argv[0].as.s->data;
+    Value pkg = ensure_package(vm);
+    Value cpath_val;
+    const char *cpath = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so";
+    
+    if (tbl_get(pkg.as.t, V_str_from_c("cpath"), &cpath_val) && cpath_val.tag == VAL_STR) {
+        cpath = cpath_val.as.s->data;
+    }
+    
+    fprintf(stderr, "[DEBUG] clib_searcher called for module: %s\n", modname);
+    fprintf(stderr, "[DEBUG] cpath: %s\n", cpath);
+    
+    char *modpath = modname_to_path(modname);
+    const char *p = cpath;
+    void *handle = NULL;
+    char *successful_path = NULL;
+    
+    // Search for the .so file
+    while (*p) {
+        const char *q = p;
+        while (*q && *q != ';') q++;
+        size_t len = (size_t)(q - p);
+        char *templ = (char*)xmalloc(len + 1);
+        memcpy(templ, p, len);
+        templ[len] = '\0';
+        
+        char *so_path = expand_one(templ, modpath);
+        free(templ);
+        
+        fprintf(stderr, "[DEBUG] Trying: %s\n", so_path);
+        
+        // Try to load the shared library
+        handle = dlopen(so_path, RTLD_NOW | RTLD_GLOBAL);
+        if (handle) {
+            successful_path = so_path;
+            fprintf(stderr, "[DEBUG] Successfully loaded: %s\n", so_path);
+            break;
+        } else {
+            const char *err = dlerror();
+            fprintf(stderr, "[DEBUG] Failed: %s\n", err ? err : "unknown");
+        }
+        
+        free(so_path);
+        if (*q == ';') q++;
+        p = q;
+    }
+    
+    if (!handle) {
+        fprintf(stderr, "[DEBUG] Module .so not found\n");
+        free(modpath);
+        
+        // Return error message
+        char err[512];
+        snprintf(err, sizeof(err), "\n\tno file '%s.so' in cpath:\n\t\t%s", 
+                modname, cpath);
+        return V_str_from_c(err);
+    }
+    
+    free(modpath);
+    
+    // Look for luaopen_<modname> function
+    char *func_name = modname_to_cfuncname(modname);
+    fprintf(stderr, "[DEBUG] Looking for: %s\n", func_name);
+    
+    typedef Value (*luaopen_vm_func)(VM*, int, Value*);
+    luaopen_vm_func vm_opener = (luaopen_vm_func)dlsym(handle, func_name);
+    
+    if (vm_opener) {
+        fprintf(stderr, "[DEBUG] Found opener, calling it\n");
+        Value result = vm_opener(vm, 0, NULL);
+        free(func_name);
+        free(successful_path);
+        return result;
+    }
+    
+    const char *err = dlerror();
+    fprintf(stderr, "[DEBUG] Symbol not found: %s\n", err ? err : "unknown");
+    
+    free(func_name);
+    free(successful_path);
+    dlclose(handle);
+    
+    // Return error message about incompatible module
+    char errmsg[512];
+    snprintf(errmsg, sizeof(errmsg), 
+            "\n\tC module '%s' is incompatible with LuaX (standard Lua C API not supported)", 
+            modname);
+    return V_str_from_c(errmsg);
+}
+
+// Update the default_package_path function (keep as is)
+static const char *default_package_path(void) {
+    const char *env54 = getenv("LUA_PATH_5_4");
+    const char *env   = getenv("LUA_PATH");
+    if (env54 && *env54) return env54;
+    if (env   && *env)   return env;
+
+    /* Detect Homebrew prefix dynamically */
+    const char *brew_prefix = NULL;
+    if (access("/opt/homebrew", F_OK) == 0)
+        brew_prefix = "/opt/homebrew";      /* Apple Silicon */
+    else if (access("/usr/local", F_OK) == 0)
+        brew_prefix = "/usr/local";         /* Intel / legacy */
+    else
+        brew_prefix = "/usr";               /* fallback */
+
+    static char pathbuf[2048];
+    snprintf(pathbuf, sizeof(pathbuf),
+        "?.lua;?/init.lua;"
+        "./?.lua;./?/init.lua;"
+        "%s/share/lua/5.4/?.lua;%s/share/lua/5.4/?/init.lua;"
+        "%s/lib/lua/5.4/?.lua;%s/lib/lua/5.4/?/init.lua;"
+        "%s/lib/luarocks/rocks-5.4/?.lua;%s/lib/luarocks/rocks-5.4/?/init.lua;"
+        "%s/lib/luarocks/rocks-5.4/?/init.lua",
+        brew_prefix, brew_prefix,
+        brew_prefix, brew_prefix,
+        brew_prefix, brew_prefix,
+        brew_prefix);
+
+    return pathbuf;
+}
+
+static const char *default_package_cpath(void) {
+    const char *env54 = getenv("LUA_CPATH_5_4");
+    if (env54 && *env54) return env54;
+
+    const char *home = getenv("HOME");
+    const char *brew_prefix = NULL;
+    if (access("/opt/homebrew", F_OK) == 0)
+        brew_prefix = "/opt/homebrew";      /* Apple Silicon */
+    else if (access("/usr/local", F_OK) == 0)
+        brew_prefix = "/usr/local";         /* Intel / legacy */
+    else
+        brew_prefix = "/usr";               /* fallback */
+
+    static char cpathbuf[2048];
+    if (home) {
+        snprintf(cpathbuf, sizeof(cpathbuf),
+            "?.so;./?.so;"
+            "%s/.luarocks/lib/lua/5.4/?.so;"
+            "%s/lib/lua/5.4/?.so;%s/lib/lua/5.4/?/core.so;"
+            "%s/lib/lua/5.4/loadall.so",
+            home,
+            brew_prefix, brew_prefix,
+            brew_prefix);
+    } else {
+        snprintf(cpathbuf, sizeof(cpathbuf),
+            "?.so;./?.so;"
+            "%s/lib/lua/5.4/?.so;%s/lib/lua/5.4/?/core.so;"
+            "%s/lib/lua/5.4/loadall.so",
+            brew_prefix, brew_prefix,
+            brew_prefix);
+    }
+
+    return cpathbuf;
+}
+// Complete interpret function
 int interpret(AST *root){
-  VM vm; memset(&vm,0,sizeof(vm));
+  VM vm; 
+  memset(&vm, 0, sizeof(vm));
   vm.env = env_push(NULL);
   vm.co_yielding   = false;
   vm.co_yield_vals = V_table();
@@ -1342,47 +1649,82 @@ int interpret(AST *root){
   vm.active_co     = NULL;
   vm.err_frame = NULL;
   vm.err_obj   = V_nil();
+  
   env_add_builtins(&vm);
+  
+  // Set up the package system
   {
     Value package = V_table();
     Value loaded  = V_table();
     Value preload = V_table();
     Value searchers = V_table();
-const char *lua_path_env  = getenv("LUA_PATH");
-const char *rocks_tree1   = "/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
-const char *rocks_tree2   = "/usr/share/lua/5.4/?.lua;/usr/share/lua/5.4/?/init.lua";
-const char *local_tree    = "?.lua;?/init.lua;./?.lua;./?/init.lua";
-const char *user_tree     = "~/.luarocks/share/lua/5.4/?.lua;~/.luarocks/share/lua/5.4/?/init.lua";
-if (lua_path_env && *lua_path_env) {
-  snprintf(path_buf, sizeof(path_buf), "%s;%s;%s;%s",
-           lua_path_env, local_tree, rocks_tree1, rocks_tree2);
-} else {
-  snprintf(path_buf, sizeof(path_buf), "%s;%s;%s",
-           local_tree, rocks_tree1, rocks_tree2);
-}
-const char *lua_cpath_env = getenv("LUA_CPATH");
-char cpath_buf[2048];
-const char *cpath_default = "./?.so;/usr/local/lib/lua/5.4/?.so;/usr/lib/lua/5.4/?.so;~/.luarocks/lib/lua/5.4/?.so";
-const char *cpath_final;
-if (lua_cpath_env && *lua_cpath_env) {
-  snprintf(cpath_buf, sizeof(cpath_buf), "%s;%s", lua_cpath_env, cpath_default);
-  cpath_final = cpath_buf;
-} else {
-  cpath_final = cpath_default;
-}
+    
+    // ALWAYS use our 5.4 defaults, ignore environment variables with 5.1
+    const char *lua_path = default_package_path();
+    const char *lua_cpath = default_package_cpath();
+    
+    char path_buf[4096];
+    char cpath_buf[4096];
+    
+    // Check environment variables - only use them if they DON'T contain "5.1"
+    const char *lua_path_env  = getenv("LUA_PATH");
+    const char *lua_cpath_env = getenv("LUA_CPATH");
+    
+    // Use environment only if it doesn't have 5.1 paths
+    if (lua_path_env && *lua_path_env && !strstr(lua_path_env, "5.1")) {
+      snprintf(path_buf, sizeof(path_buf), "%s;%s", lua_path_env, lua_path);
+    } else {
+      // Just use our 5.4 defaults
+      snprintf(path_buf, sizeof(path_buf), "%s", lua_path);
+    }
+    
+    if (lua_cpath_env && *lua_cpath_env && !strstr(lua_cpath_env, "5.1")) {
+      snprintf(cpath_buf, sizeof(cpath_buf), "%s;%s", lua_cpath_env, lua_cpath);
+    } else {
+      // Just use our 5.4 defaults
+      snprintf(cpath_buf, sizeof(cpath_buf), "%s", lua_cpath);
+    }
+    
+    // Register searchers in order: preload, Lua files, C libs
+    Value preload_searcher;
+    preload_searcher.tag = VAL_CFUNC;
+    preload_searcher.as.cfunc = builtin_preload_searcher;
+    tbl_set(searchers.as.t, V_int(1), preload_searcher);
+    
+    Value file_searcher;
+    file_searcher.tag = VAL_CFUNC;
+    file_searcher.as.cfunc = builtin_file_searcher;
+    tbl_set(searchers.as.t, V_int(2), file_searcher);
+    
+    Value clib_searcher;
+    clib_searcher.tag = VAL_CFUNC;
+    clib_searcher.as.cfunc = builtin_clib_searcher;
+    tbl_set(searchers.as.t, V_int(3), clib_searcher);
+    
+    // Set up package table
     tbl_set(package.as.t, V_str_from_c("loaded"),    loaded);
     tbl_set(package.as.t, V_str_from_c("preload"),   preload);
     tbl_set(package.as.t, V_str_from_c("searchers"), searchers);
     tbl_set(package.as.t, V_str_from_c("path"),      V_str_from_c(path_buf));
-    tbl_set(package.as.t, V_str_from_c("cpath"),     V_str_from_c(cpath_final));
-    env_add(vm.env, "package",  package, false);
-    env_add(vm.env, "Packages", package, false);
+    tbl_set(package.as.t, V_str_from_c("cpath"),     V_str_from_c(cpath_buf));
+    
+    tbl_set(package.as.t, V_str_from_c("config"), 
+            V_str_from_c("/\n;\n?\n!\n-\n"));
+    
+    env_add(vm.env, "package", package, false);
   }
+  
   register_libs(&vm);
   exec_stmt(&vm, root);
+  
   return 0;
 }
-void exec_stmt_repl(VM *vm, AST *n) {exec_stmt(vm, n);}
+
+// Keep your existing exec_stmt_repl and vm_load_and_run_file functions
+void exec_stmt_repl(VM *vm, AST *n) {
+    exec_stmt(vm, n);
+}
+
 Value vm_load_and_run_file(VM *vm, const char *path, const char *modname) {
     (void)modname; 
     size_t n = 0;
@@ -1392,17 +1734,23 @@ Value vm_load_and_run_file(VM *vm, const char *path, const char *modname) {
         snprintf(err_buf, sizeof(err_buf), "cannot open file '%s'", path);
         return V_str_from_c(err_buf);
     }
+    
     FILE *fp = open_string_as_FILE(src);
     free(src);
-    if (!fp) {return V_str_from_c("failed to create string FILE");}
+    if (!fp) {
+        return V_str_from_c("failed to create string FILE");
+    }
+    
     AST *program = compile_chunk_from_FILE(fp);
     fclose(fp);
+    
     Func *fn = xmalloc(sizeof(*fn));
     memset(fn, 0, sizeof(*fn));
     fn->params = (ASTVec){0};
     fn->vararg = false;
     fn->body = program;
     fn->env = vm->env;
+    
     Value result = call_function(vm, fn, 0, NULL);
     return (result.tag == VAL_NIL) ? V_bool(true) : result;
 }
