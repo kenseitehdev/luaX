@@ -49,7 +49,8 @@ typedef enum {
     AST_LABEL,           /* ::label:: */
     AST_FUNC_STMT,       /* function namechain(params) body end */
     AST_LOCAL_FUNC,
-    AST_TRY
+    AST_TRY,
+    AST_COMPOUND_ASSIGN
 } ASTKind;
 
 typedef enum {
@@ -67,6 +68,11 @@ typedef enum {
     OP_IDIV
 } OpKind;
 
+typedef struct {
+  AST *target;   /* Name | Field | Index */
+  OpKind op;     /* OP_ADD or OP_SUB (later more) */
+  AST *value;    /* rhs expression */
+} ASTCompoundAssign;
 typedef struct {
     AST   **items;
     size_t  count, cap;

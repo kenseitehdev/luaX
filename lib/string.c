@@ -581,7 +581,12 @@ static Value str_find(struct VM *vm, int argc, Value *argv) {
   }
 }
 
-/* string.match(s, pattern [, init]) */
+/* string.match(s, pattern [, init]) 
+ * Returns: single string for one capture, or unpacks table values for multiple captures
+ * 
+ * IMPORTANT: This relies on the VM's ability to unpack table returns into multiple values.
+ * If the VM doesn't support this, callers must explicitly index the table.
+ */
 static Value str_match(struct VM *vm, int argc, Value *argv) {
   (void)vm;
   if (argc < 2 || argv[0].tag != VAL_STR || argv[1].tag != VAL_STR) 
@@ -620,24 +625,37 @@ static Value str_match(struct VM *vm, int argc, Value *argv) {
     s2 = match(&ms, s1, p);
     if (s2 != NULL) {
       if (ms.level > 0) {
-        /* Return captures */
+        /* We have captures */
         if (ms.level == 1) {
+          /* Single capture: return as string directly */
           if (ms.capture[0].len >= 0) {
             return V_str_copy_n(ms.capture[0].init, (size_t)ms.capture[0].len);
           }
-          return V_nil();
+          /* Position capture */
+          return V_int((long long)ms.capture[0].len);
         } else {
+          /* Multiple captures: return as array-like table */
+          /* The VM must support unpacking this for: local a, b = match(...) */
           Value t = V_table();
+          
           for (int i = 0; i < ms.level; i++) {
             if (ms.capture[i].len >= 0) {
+              /* String capture */
               Value cap = V_str_copy_n(ms.capture[i].init, (size_t)ms.capture[i].len);
               tbl_set_public(t.as.t, V_int(i + 1), cap);
+            } else {
+              /* Position capture - return as integer */
+              tbl_set_public(t.as.t, V_int(i + 1), V_int((long long)ms.capture[i].len));
             }
           }
+          
+          /* Store count for unpacking */
+          tbl_set_public(t.as.t, V_str_from_c("n"), V_int(ms.level));
+          
           return t;
         }
       } else {
-        /* Return whole match */
+        /* No captures: return whole match as string */
         size_t match_len = (size_t)(s2 - s1);
         return V_str_copy_n(s1, match_len);
       }
@@ -646,7 +664,6 @@ static Value str_match(struct VM *vm, int argc, Value *argv) {
   
   return V_nil();
 }
-
 /* Iterator state for gmatch (simple, global static pos) */
 static Value gmatch_next(struct VM *vm, int argc, Value *argv) {
   (void)vm;
