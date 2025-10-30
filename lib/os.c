@@ -105,6 +105,24 @@ static Value os_time(struct VM *vm, int argc, Value *argv) {
   return V_int((long long)tt);
 }
 
+static Value os_chdir(struct VM *vm, int argc, Value *argv) {
+    (void)vm;
+    if (argc < 1 || argv[0].tag != VAL_STR)
+        return V_bool(0);  // <-- returns a proper Value false
+
+    int rc = chdir(argv[0].as.s->data);
+    return V_bool(rc == 0);  // <-- wrap int result in V_bool()
+}
+
+static Value os_getcwd(struct VM *vm, int argc, Value *argv) {
+    (void)vm;
+    (void)argc;
+    (void)argv;
+    char buf[PATH_MAX];
+    if (!getcwd(buf, sizeof(buf)))
+        return V_nil();
+    return V_str_from_c(buf);
+}
 /* -------------------------------------------------------
  * os.difftime(t2, t1) -> seconds (double)
  * ------------------------------------------------------- */
@@ -407,5 +425,7 @@ void register_os_lib(struct VM *vm) {
   tbl_set_public(os.as.t, V_str_from_c("tmpname"),   (Value){.tag=VAL_CFUNC, .as.cfunc=os_tmpname});
   tbl_set_public(os.as.t, V_str_from_c("date"),      (Value){.tag=VAL_CFUNC, .as.cfunc=os_date});
 
+tbl_set_public(os.as.t, V_str_from_c("chdir"), (Value){.tag=VAL_CFUNC, .as.cfunc=os_chdir});
+tbl_set_public(os.as.t, V_str_from_c("getcwd"), (Value){.tag=VAL_CFUNC, .as.cfunc=os_getcwd});
   env_add_public(vm->env, "os", os, false);
 }
