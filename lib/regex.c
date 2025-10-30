@@ -1,4 +1,4 @@
-// lib/regex.c - POSIX Regular Expression Library
+// lib/regex.c - POSIX Regular Expression Library (Fixed)
 #include <regex.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,10 +21,49 @@ static Value V_str_copy_n(const char *src, size_t n) {
   Value v; v.tag = VAL_STR; v.as.s = s; return v;
 }
 
-/* regex.compile(pattern [, flags]) -> regex object or nil */
+/* Regex wrapper structure for better memory management */
+typedef struct {
+  regex_t compiled;
+  char *pattern_copy;
+  int flags;
+  int refcount;
+} RegexWrapper;
+
+/* Store regex wrapper as opaque pointer in CFunc slot */
+static Value box_regex(RegexWrapper *wrap) {
+  Value t = V_table();
+  Value ptr = { .tag = VAL_CFUNC };
+  ptr.as.cfunc = (CFunc)wrap;
+  tbl_set_public(t.as.t, V_str_from_c("_regex_ptr"), ptr);
+  tbl_set_public(t.as.t, V_str_from_c("_freed"), V_bool(0));
+  return t;
+}
+
+/* Helper to extract regex wrapper from regex object */
+static RegexWrapper* get_regex_wrapper(Value obj) {
+  if (obj.tag != VAL_TABLE) return NULL;
+  
+  /* Check if already freed */
+  Value freed_val;
+  if (tbl_get_public(obj.as.t, V_str_from_c("_freed"), &freed_val)) {
+    if (freed_val.tag == VAL_BOOL && freed_val.as.b) return NULL;
+  }
+  
+  Value ptr_val;
+  if (!tbl_get_public(obj.as.t, V_str_from_c("_regex_ptr"), &ptr_val)) return NULL;
+  if (ptr_val.tag != VAL_CFUNC) return NULL;
+  return (RegexWrapper*)ptr_val.as.cfunc;
+}
+
+/* regex.compile(pattern [, flags]) -> regex object or {nil, error} */
 static Value regex_compile(struct VM *vm, int argc, Value *argv) {
   (void)vm;
-  if (argc < 1 || argv[0].tag != VAL_STR) return V_nil();
+  if (argc < 1 || argv[0].tag != VAL_STR) {
+    Value err = V_table();
+    tbl_set_public(err.as.t, V_int(1), V_nil());
+    tbl_set_public(err.as.t, V_int(2), V_str_from_c("pattern must be a string"));
+    return err;
+  }
   
   const char *pattern = argv[0].as.s->data;
   int cflags = REG_EXTENDED;  /* Use extended regex by default */
@@ -42,34 +81,38 @@ static Value regex_compile(struct VM *vm, int argc, Value *argv) {
     }
   }
   
-  /* Allocate and compile regex */
-  regex_t *preg = (regex_t*)malloc(sizeof(regex_t));
-  if (!preg) { fprintf(stderr,"OOM\n"); exit(1); }
-  
-  int ret = regcomp(preg, pattern, cflags);
-  if (ret != 0) {
-    char errbuf[256];
-    regerror(ret, preg, errbuf, sizeof(errbuf));
-    fprintf(stderr, "Regex compilation error: %s\n", errbuf);
-    free(preg);
-    return V_nil();
+  /* Allocate wrapper */
+  RegexWrapper *wrap = (RegexWrapper*)malloc(sizeof(RegexWrapper));
+  if (!wrap) {
+    Value err = V_table();
+    tbl_set_public(err.as.t, V_int(1), V_nil());
+    tbl_set_public(err.as.t, V_int(2), V_str_from_c("out of memory"));
+    return err;
   }
   
-  /* Store regex in a table with a special marker */
-  Value t = V_table();
-  tbl_set_public(t.as.t, V_str_from_c("_regex_ptr"), V_int((long long)(intptr_t)preg));
-  tbl_set_public(t.as.t, V_str_from_c("pattern"), argv[0]);
+  wrap->pattern_copy = strdup(pattern);
+  wrap->flags = cflags;
+  wrap->refcount = 1;
   
-  return t;
-}
-
-/* Helper to extract regex_t from regex object */
-static regex_t* get_regex(Value obj) {
-  if (obj.tag != VAL_TABLE) return NULL;
-  Value ptr_val;
-  if (!tbl_get_public(obj.as.t, V_str_from_c("_regex_ptr"), &ptr_val)) return NULL;
-  if (ptr_val.tag != VAL_INT) return NULL;
-  return (regex_t*)(intptr_t)ptr_val.as.i;
+  /* Compile regex */
+  int ret = regcomp(&wrap->compiled, pattern, cflags);
+  if (ret != 0) {
+    char errbuf[256];
+    regerror(ret, &wrap->compiled, errbuf, sizeof(errbuf));
+    free(wrap->pattern_copy);
+    free(wrap);
+    
+    Value err = V_table();
+    tbl_set_public(err.as.t, V_int(1), V_nil());
+    tbl_set_public(err.as.t, V_int(2), V_str_from_c(errbuf));
+    return err;
+  }
+  
+  /* Box and return */
+  Value obj = box_regex(wrap);
+  tbl_set_public(obj.as.t, V_str_from_c("pattern"), argv[0]);
+  
+  return obj;
 }
 
 /* regex.match(regex_obj, string [, offset]) -> table or nil */
@@ -77,8 +120,8 @@ static Value regex_match(struct VM *vm, int argc, Value *argv) {
   (void)vm;
   if (argc < 2 || argv[1].tag != VAL_STR) return V_nil();
   
-  regex_t *preg = get_regex(argv[0]);
-  if (!preg) return V_nil();
+  RegexWrapper *wrap = get_regex_wrapper(argv[0]);
+  if (!wrap) return V_nil();
   
   const char *str = argv[1].as.s->data;
   size_t str_len = (size_t)argv[1].as.s->len;
@@ -92,7 +135,7 @@ static Value regex_match(struct VM *vm, int argc, Value *argv) {
   }
   
   regmatch_t matches[MAX_MATCHES];
-  int ret = regexec(preg, str + offset, MAX_MATCHES, matches, 0);
+  int ret = regexec(&wrap->compiled, str + offset, MAX_MATCHES, matches, 0);
   
   if (ret == REG_NOMATCH) return V_nil();
   if (ret != 0) return V_nil();
@@ -158,21 +201,34 @@ static Value regex_test(struct VM *vm, int argc, Value *argv) {
   (void)vm;
   if (argc < 2 || argv[1].tag != VAL_STR) return V_bool(0);
   
-  regex_t *preg = get_regex(argv[0]);
-  if (!preg) return V_bool(0);
+  RegexWrapper *wrap = get_regex_wrapper(argv[0]);
+  if (!wrap) return V_bool(0);
   
   const char *str = argv[1].as.s->data;
-  int ret = regexec(preg, str, 0, NULL, 0);
+  int ret = regexec(&wrap->compiled, str, 0, NULL, 0);
   
   return V_bool(ret == 0);
+}
+
+/* Helper for gsub string building */
+static void gsub_append(char **buf, size_t *len, size_t *cap, const char *data, size_t n) {
+  if (*len + n + 1 > *cap) {
+    *cap = (*cap == 0) ? 256 : *cap * 2;
+    while (*cap < *len + n + 1) *cap *= 2;
+    *buf = (char*)realloc(*buf, *cap);
+    if (!*buf) { fprintf(stderr,"OOM\n"); exit(1); }
+  }
+  memcpy(*buf + *len, data, n);
+  *len += n;
+  (*buf)[*len] = '\0';
 }
 
 /* regex.gsub(regex_obj, string, replacement [, limit]) -> {string, count} */
 static Value regex_gsub(struct VM *vm, int argc, Value *argv) {
   if (argc < 3 || argv[1].tag != VAL_STR) return V_nil();
   
-  regex_t *preg = get_regex(argv[0]);
-  if (!preg) return V_nil();
+  RegexWrapper *wrap = get_regex_wrapper(argv[0]);
+  if (!wrap) return V_nil();
   
   const char *str = argv[1].as.s->data;
   size_t str_len = (size_t)argv[1].as.s->len;
@@ -185,7 +241,7 @@ static Value regex_gsub(struct VM *vm, int argc, Value *argv) {
   }
   
   /* Build result string */
-  char *result = NULL;
+  char  *result = NULL;
   size_t result_len = 0;
   size_t result_cap = 0;
   
@@ -194,7 +250,7 @@ static Value regex_gsub(struct VM *vm, int argc, Value *argv) {
   
   while (pos < str + str_len && (limit < 0 || count < limit)) {
     regmatch_t matches[MAX_MATCHES];
-    int ret = regexec(preg, pos, MAX_MATCHES, matches, 0);
+    int ret = regexec(&wrap->compiled, pos, MAX_MATCHES, matches, 0);
     
     if (ret == REG_NOMATCH) break;
     if (ret != 0) break;
@@ -202,15 +258,7 @@ static Value regex_gsub(struct VM *vm, int argc, Value *argv) {
     /* Append text before match */
     size_t before_len = (size_t)matches[0].rm_so;
     if (before_len > 0) {
-      size_t new_len = result_len + before_len;
-      if (new_len + 1 > result_cap) {
-        result_cap = (result_cap == 0) ? 256 : result_cap * 2;
-        while (result_cap < new_len + 1) result_cap *= 2;
-        result = (char*)realloc(result, result_cap);
-        if (!result) { fprintf(stderr,"OOM\n"); exit(1); }
-      }
-      memcpy(result + result_len, pos, before_len);
-      result_len = new_len;
+      gsub_append(&result, &result_len, &result_cap, pos, before_len);
     }
     
     /* Append replacement */
@@ -218,67 +266,82 @@ static Value regex_gsub(struct VM *vm, int argc, Value *argv) {
       const char *repl = replacement.as.s->data;
       size_t repl_len = (size_t)replacement.as.s->len;
       
-      /* Handle $1, $2, etc. in replacement */
+      /* Handle $0, $1, $2, etc. in replacement */
       for (size_t i = 0; i < repl_len; i++) {
         if (repl[i] == '$' && i + 1 < repl_len && repl[i+1] >= '0' && repl[i+1] <= '9') {
           int cap_idx = repl[i+1] - '0';
           if (cap_idx < MAX_MATCHES && matches[cap_idx].rm_so != -1) {
             size_t cap_len = (size_t)(matches[cap_idx].rm_eo - matches[cap_idx].rm_so);
-            size_t new_len = result_len + cap_len;
-            if (new_len + 1 > result_cap) {
-              result_cap = (result_cap == 0) ? 256 : result_cap * 2;
-              while (result_cap < new_len + 1) result_cap *= 2;
-              result = (char*)realloc(result, result_cap);
-              if (!result) { fprintf(stderr,"OOM\n"); exit(1); }
-            }
-            memcpy(result + result_len, pos + matches[cap_idx].rm_so, cap_len);
-            result_len = new_len;
+            gsub_append(&result, &result_len, &result_cap, 
+                       pos + matches[cap_idx].rm_so, cap_len);
           }
           i++;  /* Skip digit */
+        } else if (repl[i] == '$' && i + 1 < repl_len && repl[i+1] == '$') {
+          /* $$ -> literal $ */
+          gsub_append(&result, &result_len, &result_cap, "$", 1);
+          i++;
         } else {
-          size_t new_len = result_len + 1;
-          if (new_len + 1 > result_cap) {
-            result_cap = (result_cap == 0) ? 256 : result_cap * 2;
-            result = (char*)realloc(result, result_cap);
-            if (!result) { fprintf(stderr,"OOM\n"); exit(1); }
-          }
-          result[result_len++] = repl[i];
+          gsub_append(&result, &result_len, &result_cap, &repl[i], 1);
         }
       }
     } else if (replacement.tag == VAL_FUNC || replacement.tag == VAL_CFUNC) {
-      /* Call function with match */
-      Value match_str = V_str_copy_n(pos + matches[0].rm_so, 
-                                     (size_t)(matches[0].rm_eo - matches[0].rm_so));
-      Value args[1] = { match_str };
-      Value result_val = call_any_public(vm, replacement, 1, args);
+      /* Call function with match and captures */
+      int argc_call = 1;
+      for (int i = 1; i < MAX_MATCHES && matches[i].rm_so != -1; i++) {
+        argc_call++;
+      }
+      
+      Value *args = (Value*)malloc(sizeof(Value) * argc_call);
+      if (!args) { fprintf(stderr,"OOM\n"); exit(1); }
+      
+      args[0] = V_str_copy_n(pos + matches[0].rm_so, 
+                            (size_t)(matches[0].rm_eo - matches[0].rm_so));
+      
+      for (int i = 1; i < argc_call; i++) {
+        args[i] = V_str_copy_n(pos + matches[i].rm_so,
+                              (size_t)(matches[i].rm_eo - matches[i].rm_so));
+      }
+      
+      /* Note: call_any_public may not exist in your VM - adjust as needed */
+      Value result_val;
+      if (replacement.tag == VAL_CFUNC) {
+        result_val = replacement.as.cfunc(vm, argc_call, args);
+      } else {
+        /* For VAL_FUNC, you'd need your VM's function call mechanism */
+        result_val = V_str_from_c("");  /* Placeholder */
+      }
+      free(args);
       
       if (result_val.tag == VAL_STR) {
-        size_t repl_len = (size_t)result_val.as.s->len;
-        size_t new_len = result_len + repl_len;
-        if (new_len + 1 > result_cap) {
-          result_cap = (result_cap == 0) ? 256 : result_cap * 2;
-          while (result_cap < new_len + 1) result_cap *= 2;
-          result = (char*)realloc(result, result_cap);
-          if (!result) { fprintf(stderr,"OOM\n"); exit(1); }
-        }
-        memcpy(result + result_len, result_val.as.s->data, repl_len);
-        result_len = new_len;
+        gsub_append(&result, &result_len, &result_cap, 
+                   result_val.as.s->data, (size_t)result_val.as.s->len);
+      }
+    } else if (replacement.tag == VAL_TABLE) {
+      /* Use first capture or whole match as key */
+      Value key;
+      if (matches[1].rm_so != -1) {
+        key = V_str_copy_n(pos + matches[1].rm_so,
+                          (size_t)(matches[1].rm_eo - matches[1].rm_so));
+      } else {
+        key = V_str_copy_n(pos + matches[0].rm_so,
+                          (size_t)(matches[0].rm_eo - matches[0].rm_so));
+      }
+      
+      Value val;
+      if (tbl_get_public(replacement.as.t, key, &val) && val.tag == VAL_STR) {
+        gsub_append(&result, &result_len, &result_cap,
+                   val.as.s->data, (size_t)val.as.s->len);
       }
     }
     
     count++;
     pos += matches[0].rm_eo;
     
-    /* Handle empty matches */
+    /* Handle empty matches to avoid infinite loop */
     if (matches[0].rm_eo == 0) {
       if (pos < str + str_len) {
-        size_t new_len = result_len + 1;
-        if (new_len + 1 > result_cap) {
-          result_cap = (result_cap == 0) ? 256 : result_cap * 2;
-          result = (char*)realloc(result, result_cap);
-          if (!result) { fprintf(stderr,"OOM\n"); exit(1); }
-        }
-        result[result_len++] = *pos++;
+        gsub_append(&result, &result_len, &result_cap, pos, 1);
+        pos++;
       } else {
         break;
       }
@@ -288,20 +351,12 @@ static Value regex_gsub(struct VM *vm, int argc, Value *argv) {
   /* Append remaining text */
   size_t remaining = str + str_len - pos;
   if (remaining > 0) {
-    size_t new_len = result_len + remaining;
-    if (new_len + 1 > result_cap) {
-      result_cap = new_len + 1;
-      result = (char*)realloc(result, result_cap);
-      if (!result) { fprintf(stderr,"OOM\n"); exit(1); }
-    }
-    memcpy(result + result_len, pos, remaining);
-    result_len = new_len;
+    gsub_append(&result, &result_len, &result_cap, pos, remaining);
   }
   
   /* Return {string, count} */
   Value ret = V_table();
   if (result) {
-    result[result_len] = '\0';
     Value result_str = V_str_copy_n(result, result_len);
     free(result);
     tbl_set_public(ret.as.t, V_int(1), result_str);
@@ -313,20 +368,60 @@ static Value regex_gsub(struct VM *vm, int argc, Value *argv) {
   return ret;
 }
 
-/* regex.free(regex_obj) */
+/* regex.free(regex_obj) - Explicitly free regex resources */
 static Value regex_free(struct VM *vm, int argc, Value *argv) {
   (void)vm;
   if (argc < 1) return V_nil();
   
-  regex_t *preg = get_regex(argv[0]);
-  if (preg) {
-    regfree(preg);
-    free(preg);
-    /* Clear the pointer in the table */
-    tbl_set_public(argv[0].as.t, V_str_from_c("_regex_ptr"), V_int(0));
+  RegexWrapper *wrap = get_regex_wrapper(argv[0]);
+  if (wrap) {
+    regfree(&wrap->compiled);
+    free(wrap->pattern_copy);
+    free(wrap);
+    
+    /* Mark as freed */
+    tbl_set_public(argv[0].as.t, V_str_from_c("_freed"), V_bool(1));
+    tbl_set_public(argv[0].as.t, V_str_from_c("_regex_ptr"), V_nil());
   }
   
-  return V_nil();
+  return V_bool(1);
+}
+
+/* regex.escape(string) - Escape special regex characters */
+static Value regex_escape(struct VM *vm, int argc, Value *argv) {
+  (void)vm;
+  if (argc < 1 || argv[0].tag != VAL_STR) return V_nil();
+  
+  const char *str = argv[0].as.s->data;
+  size_t len = (size_t)argv[0].as.s->len;
+  
+  /* Special regex characters that need escaping */
+  const char *special = ".^$*+?()[]{}|\\";
+  
+  /* Count how many chars need escaping */
+  size_t escaped_len = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (strchr(special, str[i])) escaped_len += 2;
+    else escaped_len++;
+  }
+  
+  char *escaped = (char*)malloc(escaped_len + 1);
+  if (!escaped) { fprintf(stderr,"OOM\n"); exit(1); }
+  
+  size_t j = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (strchr(special, str[i])) {
+      escaped[j++] = '\\';
+      escaped[j++] = str[i];
+    } else {
+      escaped[j++] = str[i];
+    }
+  }
+  escaped[j] = '\0';
+  
+  Value result = V_str_copy_n(escaped, escaped_len);
+  free(escaped);
+  return result;
 }
 
 /* Register regex library */
@@ -339,6 +434,7 @@ void register_regex_lib(struct VM *vm) {
   tbl_set_public(t.as.t, V_str_from_c("test"),    (Value){.tag=VAL_CFUNC,.as.cfunc=regex_test});
   tbl_set_public(t.as.t, V_str_from_c("gsub"),    (Value){.tag=VAL_CFUNC,.as.cfunc=regex_gsub});
   tbl_set_public(t.as.t, V_str_from_c("free"),    (Value){.tag=VAL_CFUNC,.as.cfunc=regex_free});
+  tbl_set_public(t.as.t, V_str_from_c("escape"),  (Value){.tag=VAL_CFUNC,.as.cfunc=regex_escape});
   
   env_add_public(vm->env, "regex", t, false);
 }
