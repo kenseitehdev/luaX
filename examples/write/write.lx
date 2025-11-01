@@ -1,0 +1,83 @@
+-- write.lx
+import os
+import io
+
+io.write("Enter filename: ")
+local file = io.read("*l")
+
+if not file or file == "" then
+    print("No file specified. Exiting.")
+    os.exit(1)
+end
+
+-- read entire file
+local function read_file(path)
+    local f = io.open(path, "r")
+    if not f then return {} end
+    local lines = {}
+    for line in f:lines() do
+        table.insert(lines, line)
+    end
+    f:close()
+    return lines
+end
+
+-- write entire file
+local function write_file(path, lines)
+    local f = io.open(path, "w")
+    for _, line in ipairs(lines) do
+        f:write(line .. "\n")
+    end
+    f:close()
+end
+
+local lines = read_file(file)
+print("\n=== File: " .. file .. " ===")
+print(table.concat(lines, "\n"))
+
+while true do
+    io.write("\n[g=grep | s=sed | a=awk | x=close] > ")
+    local mode = io.read("*l")
+
+    if mode == "x" then
+        print("Saving and closing " .. file)
+        write_file(file, lines)
+        break
+
+    elseif mode == "g" then
+        io.write("pattern: ")
+        local patt = io.read("*l")
+        for i, l in ipairs(lines) do
+            if string.find(l, patt) then
+                print(i .. ": " .. l)
+            end
+        end
+
+    elseif mode == "s" then
+        io.write("substitute (old/new): ")
+        local expr = io.read("*l")
+        local old, new = expr:match("([^/]+)/([^/]+)")
+        if old and new then
+            for i, l in ipairs(lines) do
+                lines[i] = l:gsub(old, new)
+            end
+            print("substitution complete.")
+        else
+            print("invalid pattern.")
+        end
+
+    elseif mode == "a" then
+        io.write("awk expr (example: print(fields[1], fields[2])): ")
+        local expr = io.read("*l")
+        for _, l in ipairs(lines) do
+            local fields = {}
+            for f in l:gmatch("%S+") do table.insert(fields, f) end
+            local env = { print = print, fields = fields }
+            local chunk, err = load("function awk() " .. expr .. " end", "awk", "t", env)
+            if chunk then chunk(); env.awk() else print("error: " .. err) end
+        end
+
+    else
+        print("unknown command.")
+    end
+end
