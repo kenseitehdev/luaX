@@ -120,6 +120,7 @@ typedef struct VM {
   Env  *co_call_env;       /* the coroutine's active call env (saved across yields) */
   Coroutine *active_co;    /* which coroutine (if any) is running on this VM */
   int current_line;
+  const char *current_file;
 } VM;
 
 /* API */
