@@ -1,4 +1,5 @@
 // lib/package.c
+// NEED C API FOR SO PACKAGES FROM ROCKS
 // Package core library: package table, searchers (preload, Lua files, C libs), require(), loadlib().
 
 #include <stdio.h>
