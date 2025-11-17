@@ -50,8 +50,8 @@ Value call_debug_traceback(struct VM *vm, Value msg, int level) {
     if (!tbl_get(dbg.as.t, V_str_from_c("traceback"), &tb) || !is_callable(tb)) {
         char buf[512];
         snprintf(buf, sizeof(buf),
-                 "[LuaX]: line %d: %s\n  (no debug.traceback available)",
-                 vm->current_line,
+                 "[LuaX]: line %d: %s in File: %s \n  (no debug.traceback available)",
+                 vm->current_line, vm->current_file ? vm->current_file:"unknown",
                  (msg.tag == VAL_STR) ? msg.as.s->data : "error");
         return V_str_from_c(buf);
     }

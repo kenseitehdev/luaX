@@ -59,32 +59,51 @@ Env* env_root(Env *e){
   while(e->parent) e = e->parent;
   return e;
 }
-void env_add_builtins(VM *vm){
-  env_add(vm->env, "print",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_print},   false);
-  env_add(vm->env, "select",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_select},  false);
-  env_add(vm->env, "pairs",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pairs},   false);
-  env_add(vm->env, "ipairs",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_ipairs},  false);
-  env_add(vm->env, "assert",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_assert},         false);
-  env_add(vm->env, "collectgarbage", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_collectgarbage}, false);
-  env_add(vm->env, "error",          (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_error},          false);
-  env_add(vm->env, "_G",             (Value){.tag=VAL_CFUNC,.as.cfunc=builtin__G},             false);
-  env_add(vm->env, "getmetatable",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_getmetatable},   false);
-  env_add(vm->env, "setmetatable",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_setmetatable},   false);
-  env_add(vm->env, "rawequal",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawequal},       false);
-  env_add(vm->env, "rawget",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawget},         false);
-  env_add(vm->env, "rawset",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawset},         false);
-  env_add(vm->env, "load",           (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_load},           false);
-  env_add(vm->env, "loadfile",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_loadfile},       false);
-  env_add(vm->env, "require",        (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_require},        false);
-  env_add(vm->env, "next",           (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_next},           false);
-  env_add(vm->env, "tonumber",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tonumber},       false);
-  env_add(vm->env, "tostring",       (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tostring},       false);
-  env_add(vm->env, "type",           (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_type},           false);
-  env_add(vm->env, "_VERSION",       V_str_from_c("LuaX 1.0.2"),                                 false);
-  env_add(vm->env, "xpcall",         (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_xpcall},         false);
-  env_add(vm->env, "pcall",          (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pcall},          false);
+static inline void add_global(VM *vm, Value G, const char *name, Value v) {
+    tbl_set_public(G.as.t, V_str_from_c(name), v);
+    env_add(vm->env, name, v, false);
 }
-void  env_add_public(Env *e, const char *name, Value v, bool is_local) { env_add(e, name, v, is_local); }
+
+void env_add_builtins(VM *vm) {
+    /* create the true global table _G */
+    Value G = V_table();
+    env_add(vm->env, "_G", G, false);
+    tbl_set_public(G.as.t, V_str_from_c("_G"), G); // self-reference
+
+    /* core builtins */
+    add_global(vm, G, "print",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_print});
+    add_global(vm, G, "select",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_select});
+    add_global(vm, G, "pairs",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pairs});
+    add_global(vm, G, "ipairs",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_ipairs});
+    add_global(vm, G, "assert",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_assert});
+    add_global(vm, G, "collectgarbage", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_collectgarbage});
+    add_global(vm, G, "error",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_error});
+    add_global(vm, G, "getmetatable", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_getmetatable});
+    add_global(vm, G, "setmetatable", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_setmetatable});
+    add_global(vm, G, "rawequal", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawequal});
+    add_global(vm, G, "rawget",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawget});
+    add_global(vm, G, "rawset",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_rawset});
+    add_global(vm, G, "load",    (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_load});
+    add_global(vm, G, "loadfile",(Value){.tag=VAL_CFUNC,.as.cfunc=builtin_loadfile});
+    add_global(vm, G, "require", (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_require});
+    add_global(vm, G, "next",    (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_next});
+    add_global(vm, G, "tonumber",(Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tonumber});
+    add_global(vm, G, "tostring",(Value){.tag=VAL_CFUNC,.as.cfunc=builtin_tostring});
+    add_global(vm, G, "type",    (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_type});
+    add_global(vm, G, "_VERSION",V_str_from_c("LuaX 1.0.4"));
+    add_global(vm, G, "xpcall",  (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_xpcall});
+    add_global(vm, G, "pcall",   (Value){.tag=VAL_CFUNC,.as.cfunc=builtin_pcall});
+}
+void env_add_public(Env *e, const char *name, Value v, bool is_local) {
+    /* add to current environment */
+    env_add(e, name, v, is_local);
+
+    /* also add into _G if it exists */
+    Value G;
+    if (env_get(e, "_G", &G) && G.tag == VAL_TABLE) {
+        tbl_set_public(G.as.t, V_str_from_c(name), v);
+    }
+}
 Value call_any_public(VM *vm, Value cal, int argc, Value *argv) { return call_any(vm, cal, argc, argv); }
 void env_register_close(Env *e, int slot) {
   if (!e) return;

@@ -1,0 +1,82 @@
+-- =====================================================
+-- LuaX Shell (lxsh)
+-- Lightweight example shell for LuaX (no colon syntax)
+-- =====================================================
+
+print("[LUAX Shell] Type 'exit' to quit")
+
+-- Optional: colorized prompt if the terminal supports ANSI
+local function prompt()
+    local cwd = os.getcwd and os.getcwd() or "?"
+    io.write("\27[36m" .. cwd .. "\27[0m > ")
+    io.flush()
+end
+
+while true do
+    prompt()
+
+    local cmd = io.read("*l")
+    if not cmd or cmd == "exit" then
+        print("bye!")
+        break
+    end
+
+    -- trim spaces
+    cmd = string.gsub(cmd, "^%s*(.-)%s*$", "%1")
+    if cmd == "" then goto continue end
+
+    -- built-in: cd
+    if string.sub(cmd, 1, 2) == "cd" then
+        local path = string.match(cmd, "^cd%s+(.+)$") or os.getenv("HOME") or "."
+        local ok = os.chdir and os.chdir(path)
+        if not ok then
+            print("[error] could not change directory to", path)
+        end
+        goto continue
+    end
+
+    -- built-in: pwd
+    if cmd == "pwd" then
+        print(os.getcwd and os.getcwd() or "[unknown dir]")
+        goto continue
+    end
+
+    -- built-in: export VAR=value
+    if string.match(cmd, "^export%s+") then
+        local var, val = string.match(cmd, "^export%s+([%w_]+)=(.+)$")
+        if var and val then
+            if os.setenv then
+                os.setenv(var, val)
+                print("[env] " .. var .. "=" .. val)
+            else
+                print("[warn] os.setenv not implemented in LuaX")
+            end
+        else
+            print("[error] invalid export syntax (use export VAR=value)")
+        end
+        goto continue
+    end
+
+    -- environment variable expansion (simple $VAR)
+    cmd = string.gsub(cmd, "%$([%w_]+)", function(v)
+        local val = os.getenv and os.getenv(v)
+        return val or ""
+    end)
+
+    -- external commands via popen
+    local f = io.popen(cmd, "r")
+    if not f then
+        print("[error] popen failed for command:", cmd)
+        goto continue
+    end
+
+    local output = f.read(f, "*a") or ""
+    f.close(f)
+
+    if #output > 0 then
+        io.write(output)
+        if string.sub(output, -1) ~= "\n" then io.write("\n") end
+    end
+
+    ::continue::
+end

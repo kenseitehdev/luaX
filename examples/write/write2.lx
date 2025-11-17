@@ -1,0 +1,346 @@
+
+-- write.lx  -- merged cursed editor + mini-UNIX-toolkit for LuaX (bat, REPL, sudo-safe)
+-- Usage: write <filename>
+-- Added commands:
+--  repl : interactive Lua REPL (enter blank line to finish)
+--  (bat/batcat) is used for pretty printing when available
+-- Safety:
+--  - Any shell command that contains "sudo" will be refused
+--  - Obvious destructive commands like "rm -rf" will be refused
+
+local args = {...}
+if #args < 1 then
+    print("usage: write <filename>")
+    os.exit(1)
+end
+
+local filename = args[1]
+
+-- detect bat/batcat (returns command name or nil)
+local function find_bat()
+    local probes = {"bat", "batcat"}
+    for _, cmd in ipairs(probes) do
+        local p = io.popen('command -v ' .. cmd .. ' 2>/dev/null')
+        if p then
+            local out = p:read("*a")
+            p:close()
+            if out and out:match("%S") then
+                return cmd
+            end
+        end
+    end
+    return nil
+end
+
+local BAT = find_bat()
+
+local function pretty_print_text(text)
+    if BAT then
+        -- use paging=never so it doesn't try to paginate in non-tty environments
+        local tmpname = os.tmpname()
+        local f = io.open(tmpname, "w")
+        f:write(text)
+        f:close()
+        os.execute(string.format('%s --paging=never --style=plain "%s"', BAT, tmpname))
+        os.remove(tmpname)
+    else
+        print(text)
+    end
+end
+
+local function pretty_print_file(path)
+    if BAT then
+        os.execute(string.format('%s --paging=never --style=plain "%s"', BAT, path))
+    else
+        local f = io.open(path, "r")
+        if not f then
+            print("Cannot open file: " .. tostring(path))
+            return
+        end
+        print(f:read("*a"))
+        f:close()
+    end
+end
+
+-- read/write helpers
+local function read_file(path)
+    local f = io.open(path, "r")
+    if not f then return "" end
+    local content = f:read("*a")
+    f:close()
+    return content
+end
+
+local function write_file(path, text)
+    local f = io.open(path, "w")
+    if not f then return false, "cannot open file for writing: "..path end
+    f:write(text)
+    f:close()
+    return true
+end
+
+-- load buffer
+local buffer_text = read_file(filename)
+local buffer_lines = {}
+if buffer_text == "" then
+    buffer_lines = {}
+else
+    for line in buffer_text:gmatch("([^\n]*)\n?") do
+        table.insert(buffer_lines, line)
+    end
+end
+
+local dirty = false
+
+local function prompt(msg)
+    io.write(msg)
+    io.flush()
+    return io.read("*l") or ""
+end
+
+local function show_help()
+    print([[
+Commands:
+ c    : cat / write mode (interactive; empty line to finish)
+ g    : grep-style search (Lua pattern)
+ s    : sed-style global replace (Lua pattern)
+ a    : awk-lite (print field N)  -> you'll be prompted for field number
+ t    : tree-like listing for a directory
+ p    : pretty-print buffer (shows numbered lines)
+ repl : interactive Lua REPL (enter blank line to finish)
+ !    : shell execute via os.execute (no sudo allowed)
+ e    : shell execute and capture output (via io.popen) (no sudo allowed)
+ w    : write/save buffer to file
+ x    : save and exit
+ q    : quit without saving
+ h    : help
+]])
+end
+
+local function print_buffer(show_numbers)
+    for i, line in ipairs(buffer_lines) do
+        if show_numbers then
+            print(string.format("%4d: %s", i, line))
+        else
+            print(line)
+        end
+    end
+end
+
+local function grep(pattern)
+    local found = false
+    for i, line in ipairs(buffer_lines) do
+        local s, e = line:find(pattern)
+        if s then
+            print(string.format("%4d: %s", i, line))
+            found = true
+        end
+    end
+    if not found then print("No matches.") end
+end
+
+local function sed_replace(pattern, replacement, ask_confirm)
+    local count = 0
+    for i, line in ipairs(buffer_lines) do
+        local new, n = line:gsub(pattern, replacement)
+        if n > 0 then
+            if ask_confirm then
+                print(string.format("Line %d: %s", i, line))
+                local ans = prompt(string.format("Replace %d occurrence(s) on this line? (y/n): ", n))
+                if ans:lower():sub(1,1) == "y" then
+                    buffer_lines[i] = new
+                    dirty = true
+                    count = count + n
+                end
+            else
+                buffer_lines[i] = new
+                dirty = true
+                count = count + n
+            end
+        end
+    end
+    print(string.format("Replaced %d occurrences.", count))
+end
+
+local function awk_print_field(n)
+    n = tonumber(n) or 1
+    for i, line in ipairs(buffer_lines) do
+        local fields = {}
+        for w in line:gmatch("%S+") do table.insert(fields, w) end
+        io.write(string.format("%4d: ", i))
+        if fields[n] then print(fields[n]) else print("") end
+    end
+end
+
+-- Very lightweight tree (POSIX-ls based). Not perfect on all platforms.
+local function tree_list(path, depth)
+    depth = depth or 2
+    local function walk(dir, level)
+        if level > depth then return end
+        local p = io.popen('ls -a "' .. dir .. '" 2>/dev/null')
+        if not p then return end
+        for name in p:lines() do
+            if name ~= "." and name ~= ".." then
+                local full = dir .. "/" .. name
+                io.write(string.rep("  ", level) .. name)
+                local fh = io.open(full, "r")
+                if fh then
+                    print("")
+                    fh:close()
+                else
+                    print("/")
+                    walk(full, level+1)
+                end
+            end
+        end
+        p:close()
+    end
+    walk(path, 0)
+end
+
+-- Safety: refuse commands with sudo or obviously destructive forms
+local function is_command_blocked(cmd)
+    if not cmd then return false end
+    local lower = cmd:lower()
+    if lower:match("%s*sudo%s+") then return "command contains 'sudo' (blocked by safety policy)" end
+    -- block typical rm -rf patterns (a simple heuristic)
+    if lower:match("rm%s+%-rf") or lower:match("rm%s+%-r%s+%-%-force") then
+        return "destructive rm -rf style command (blocked by safety policy)"
+    end
+    -- block '>: /dev' redirections that could overwrite devices
+    if lower:match(">+%s*/dev") then
+        return "redirection to /dev (blocked by safety policy)"
+    end
+    return false
+end
+
+-- REPL: evaluate Lua code safely using load and pcall
+local function lua_repl()
+    print("Entering Lua REPL. Enter blank line to finish. Beware: code runs locally.")
+    while true do
+        local chunk = prompt("lua> ")
+        if not chunk or chunk == "" then break end
+        local f, err = load(chunk)
+        if not f then
+            print("Load error: " .. tostring(err))
+        else
+            local ok, rv = pcall(f)
+            if not ok then
+                print("Runtime error: " .. tostring(rv))
+            else
+                if rv ~= nil then
+                    -- print return value(s)
+                    print("=> " .. tostring(rv))
+                end
+            end
+        end
+    end
+end
+
+-- start
+print("Enter filename: " .. filename)
+print("Loaded " .. tostring(#buffer_lines) .. " lines.")
+print("Type 'h' for help. Bat pretty-printer: " .. tostring(BAT or "none"))
+
+while true do
+    local cmd = prompt("[c|g|s|a|t|p|repl|!|e|w|x|q|h] > "):gsub("^%s+", ""):gsub("%s+$","")
+    if cmd == "" then
+        -- ignore empty
+    elseif cmd == "h" then
+        show_help()
+    elseif cmd == "p" then
+        print_buffer(true)
+    elseif cmd == "c" then
+        print("Entering write mode. Submit lines; empty line ends input.")
+        local mode = prompt("[r]eplace / [a]ppend? (r/a): "):lower()
+        local lines = {}
+        while true do
+            io.write("> "); io.flush()
+            local L = io.read("*l")
+            if not L or L == "" then break end
+            table.insert(lines, L)
+        end
+        if mode == "r" then
+            buffer_lines = lines
+            dirty = true
+            print("Buffer replaced; " .. tostring(#lines) .. " lines.")
+        else
+            for _, L in ipairs(lines) do table.insert(buffer_lines, L) end
+            dirty = true
+            print("Appended " .. tostring(#lines) .. " lines.")
+        end
+    elseif cmd == "g" then
+        local pat = prompt("Lua pattern to search for (plain Lua pattern): ")
+        if pat ~= "" then grep(pat) end
+    elseif cmd == "s" then
+        local pat = prompt("Lua pattern to replace: ")
+        local rep = prompt("Replacement (use Lua capture patterns): ")
+        local confirm = prompt("Confirm each line? (y/n): "):lower():sub(1,1) == "y"
+        sed_replace(pat, rep, confirm)
+    elseif cmd == "a" then
+        local n = prompt("Field number to print (1 = first): ")
+        awk_print_field(n)
+    elseif cmd == "t" then
+        local path = prompt("Directory to tree-list (default .): ")
+        if path == "" then path = "." end
+        tree_list(path, 2)
+    elseif cmd == "w" then
+        local ok, err = write_file(filename, table.concat(buffer_lines, "\n"))
+        if ok then
+            dirty = false
+            print("Saved to " .. filename)
+        else
+            print("Save failed: " .. tostring(err))
+        end
+    elseif cmd == "x" then
+        local ok, err = write_file(filename, table.concat(buffer_lines, "\n"))
+        if ok then
+            print("Saved and exiting.")
+            os.exit(0)
+        else
+            print("Save failed: " .. tostring(err))
+        end
+    elseif cmd == "q" then
+        if dirty then
+            local ans = prompt("Buffer modified; quit without saving? (y/n): ")
+            if ans:lower():sub(1,1) == "y" then os.exit(0) end
+        else
+            os.exit(0)
+        end
+    elseif cmd == "!" then
+        local shell = prompt("Shell command to run (os.execute) — dangerous: ")
+        local blocked = is_command_blocked(shell)
+        if blocked then
+            print("BLOCKED: " .. blocked)
+        elseif shell ~= "" then
+            print("Running (no sudo allowed). Warning: this runs on your machine.")
+            local rc = os.execute(shell)
+            print("os.execute returned: " .. tostring(rc))
+        end
+    elseif cmd == "e" then
+        local shell = prompt("Shell command to run (capture output): ")
+        local blocked = is_command_blocked(shell)
+        if blocked then
+            print("BLOCKED: " .. blocked)
+        elseif shell ~= "" then
+            local p = io.popen(shell)
+            if p then
+                local out = p:read("*a")
+                p:close()
+                -- pretty print captured output if bat is present and reasonably sized
+                if #out > 0 then
+                    pretty_print_text(out)
+                else
+                    print("(no output)")
+                end
+            else
+                print("io.popen failed.")
+            end
+        end
+    elseif cmd == "repl" then
+        print("WARNING: REPL executes Lua locally. Don't run untrusted code.")
+        lua_repl()
+    else
+        print("Unknown command. Type 'h' for help.")
+    end
+end
